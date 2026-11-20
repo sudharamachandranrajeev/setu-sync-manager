@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Setu main window: rules, plan and apply commands",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

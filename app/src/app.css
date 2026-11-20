@@ -1,0 +1,131 @@
+:root {
+  --bg: #f6f7fb;
+  --surface: #ffffff;
+  --surface-2: #f0f2f8;
+  --line: #e3e6ef;
+  --text: #171a26;
+  --muted: #646b80;
+  --faint: #9aa0b2;
+  --accent: #5b5bd6;
+  --accent-ink: #ffffff;
+  --off: #8b91a3;
+  --both: #7c4dde;
+  --out: #2f6fe4;
+  --in: #0e9f8f;
+  --warn: #b7791f;
+  --warn-bg: #fff6e5;
+  --bad: #d13b3b;
+  --bad-bg: #fdecec;
+  --ok: #1f9d55;
+  --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 8px 24px rgb(16 24 40 / 8%);
+  --radius: 10px;
+  --row: 34px;
+  color-scheme: light;
+  font-family: Inter, 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, Ubuntu, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1117;
+    --surface: #171a23;
+    --surface-2: #1e222d;
+    --line: #2a2f3c;
+    --text: #e8eaf1;
+    --muted: #a0a6b8;
+    --faint: #6c7286;
+    --accent: #7b7bf0;
+    --off: #6c7286;
+    --both: #a07cf5;
+    --out: #5b93ff;
+    --in: #2cc4b2;
+    --warn: #e0a640;
+    --warn-bg: #2c2414;
+    --bad: #f06a6a;
+    --bad-bg: #2e1718;
+    --ok: #3ccf7f;
+    --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 24px rgb(0 0 0 / 35%);
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.btn {
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font-weight: 550;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.btn.primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: var(--accent);
+}
+
+input[type='text'] {
+  font: inherit;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  width: 100%;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.mono {
+  font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', monospace;
+  font-size: 12.5px;
+}

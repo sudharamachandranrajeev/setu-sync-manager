@@ -1,0 +1,19 @@
+[package]
+name = "setu-core"
+description = "Rules, compiler and Syncthing control for Setu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+flate2 = "1"
+roxmltree = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+ureq = { version = "3.5", default-features = false, features = ["json"] }
+walkdir = "2.5"
+
+[dev-dependencies]
+tempfile = "3"
