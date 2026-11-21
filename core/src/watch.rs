@@ -260,6 +260,8 @@ pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, clie
                 }
             }
             next_gate = Instant::now() + GATE_EVERY;
+            state.alive_at = now_secs();
+            write_state(dir, &state)?;
         }
         // Holds released in the app since the last loop.
         let on_disk = read_state(dir);
