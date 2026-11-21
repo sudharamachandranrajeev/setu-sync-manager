@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { DeviceView, PlanView } from './api'
-  import { dirOf, glyph, shortLabel } from './format'
+  import { bytes, dirOf, glyph, shortLabel } from './format'
 
   let {
     view,
@@ -15,10 +15,18 @@
     other: DeviceView
     busy: boolean
     onclose: () => void
-    onapply: () => void
+    onapply: (guardConfirmed: boolean) => void
   } = $props()
 
   const plan = $derived(view.plan)
+  const pv = $derived(view.preview)
+  let understood = $state(false)
+  const guarded = $derived(pv.guard.length > 0)
+  const ruleName = (g: { rel: string }) => g.rel || 'Whole folder'
+  const modeText = (m: string) => {
+    const d = dirOf(m, me.id)
+    return d === 'out' ? `${me.name} → ${other.name}` : d === 'in' ? `${other.name} → ${me.name}` : shortLabel(d)
+  }
   const blocked = $derived(plan.problems.length > 0)
   const nothing = $derived(plan.actions.length === 0 && view.edits.length === 0)
   const typeLabel = (t: string) => ({ sendonly: 'sends only', receiveonly: 'receives only', sendreceive: 'both ways' })[t] ?? t
@@ -81,6 +89,62 @@
       {/if}
     </section>
 
+    <section>
+      <h3>Files</h3>
+      {#if pv.otherUnknown}
+        <p class="muted small">{other.name}'s file list has not arrived, so only files on {me.name} are counted.</p>
+      {/if}
+      {#if pv.groups.length === 0}
+        <p class="muted">Nothing syncs under these rules.</p>
+      {/if}
+      {#each pv.groups as g (g.rel)}
+        <div class="group">
+          <div class="ghead"><span class="mono path">{ruleName(g)}</span><span class="muted small">{modeText(g.mode)}</span></div>
+          <div class="flows">
+            {#if g.send.files}<span class="flow out">→ {g.send.files.toLocaleString()} to {other.name} · {bytes(g.send.bytes)}</span>{/if}
+            {#if g.receive.files}<span class="flow in">← {g.receive.files.toLocaleString()} from {other.name} · {bytes(g.receive.bytes)}</span>{/if}
+            {#if g.replacedThere.files}<span class="flow rep">{g.replacedThere.files.toLocaleString()} replaced on {other.name}</span>{/if}
+            {#if g.replacedHere.files}<span class="flow rep">{g.replacedHere.files.toLocaleString()} replaced here</span>{/if}
+            {#if g.staysHere.files}<span class="flow">{g.staysHere.files.toLocaleString()} only here, stay</span>{/if}
+            {#if g.staysThere.files}<span class="flow">{g.staysThere.files.toLocaleString()} only on {other.name}, stay</span>{/if}
+            {#if g.same.files}<span class="flow">{g.same.files.toLocaleString()} already the same</span>{/if}
+          </div>
+          {#if g.samples.length}
+            <details>
+              <summary class="small">Show replaced files{g.samples.length >= 200 ? ' (first 200)' : ''}</summary>
+              <ul class="samples mono small">
+                {#each g.samples as it (it.path)}
+                  <li>{it.path} <span class="muted">— {typeof it.change === 'object' && it.change.replace.winnerHere ? `${me.name}'s copy wins` : `${other.name}'s copy wins`}</span></li>
+                {/each}
+              </ul>
+            </details>
+          {/if}
+        </div>
+      {/each}
+      {#if pv.groups.some((g) => g.replacedHere.files || g.replacedThere.files)}
+        <p class="muted small">A replaced file is never lost: its old copy is kept next to it, named <span class="mono">….sync-conflict-…</span>.</p>
+      {/if}
+    </section>
+
+    {#if pv.windowsNames.length}
+      <section class="box warn">
+        <h3>Windows cannot hold these names</h3>
+        <p class="small">These will not copy to {other.name} until renamed. Everything else still syncs.</p>
+        <ul class="samples mono small">
+          {#each pv.windowsNames.slice(0, 50) as n (n.path + n.message)}<li><b>{n.path}</b>: {n.message}</li>{/each}
+        </ul>
+        {#if pv.windowsNames.length > 50}<p class="small">…and {pv.windowsNames.length - 50} more.</p>{/if}
+      </section>
+    {/if}
+
+    {#if guarded}
+      <section class="box bad">
+        <h3>Check this before applying</h3>
+        {#each pv.guard as g, i (i)}<p>{g}</p>{/each}
+        <label class="ack"><input type="checkbox" bind:checked={understood} /> I have read this and want to go ahead</label>
+      </section>
+    {/if}
+
     {#if plan.warnings.length}
       <section class="box warn">
         {#each plan.warnings as w, i (i)}<p>{w}</p>{/each}
@@ -95,7 +159,7 @@
 
   <footer>
     <button class="btn" onclick={onclose}>Cancel</button>
-    <button class="btn primary" disabled={blocked || busy || nothing} onclick={onapply}>
+    <button class="btn primary" disabled={blocked || busy || nothing || (guarded && !understood)} onclick={() => onapply(understood)}>
       {busy ? 'Applying…' : `Apply revision ${plan.revision}`}
     </button>
   </footer>
@@ -234,6 +298,63 @@
   .warn {
     background: var(--warn-bg);
     color: var(--warn);
+  }
+  .group {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .ghead {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+  }
+  .flows {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .flow {
+    font-size: 12px;
+    padding: 2px 9px;
+    border-radius: 99px;
+    background: var(--surface-2);
+    color: var(--muted);
+  }
+  .flow.out {
+    color: var(--out);
+  }
+  .flow.in {
+    color: var(--in);
+  }
+  .flow.rep {
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 14%, transparent);
+  }
+  details {
+    margin-top: 6px;
+  }
+  summary {
+    cursor: pointer;
+    color: var(--accent);
+  }
+  .samples {
+    max-height: 180px;
+    overflow: auto;
+    margin-top: 6px;
+  }
+  .samples li {
+    display: block;
+    padding: 2px 0;
+    border: none;
+    overflow-wrap: anywhere;
+  }
+  .ack {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 8px;
+    font-weight: 600;
   }
   footer {
     display: flex;

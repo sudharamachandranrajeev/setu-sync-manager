@@ -83,6 +83,11 @@ impl Client {
         self.send("PUT", &format!("config/devices/{}", enc(id)), Some(device))
     }
 
+    /// Events after `since`, waiting up to `timeout` seconds for new ones.
+    pub fn events(&self, since: u64, timeout: u64) -> Result<Vec<Value>, Error> {
+        self.get(&format!("events?since={since}&timeout={timeout}&events=ItemFinished"))
+    }
+
     pub fn default_folder(&self) -> Result<Value, Error> {
         self.get("config/defaults/folder")
     }

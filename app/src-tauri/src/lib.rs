@@ -7,7 +7,11 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use setu_core::apply::{Plan, Report};
-use setu_core::index::{self, Tree};
+use setu_core::index::Tree;
+use setu_core::compile::folder_id;
+use setu_core::control::now_secs;
+use setu_core::preview::Preview;
+use setu_core::watch;
 use setu_core::local::{config_dir, LocalConfig};
 use setu_core::rules::{short_id, Kind, Mode, Os, RuleSet};
 use setu_core::session::Session;
@@ -19,7 +23,8 @@ struct AppState {
     local: Option<Tree>,
     remote: Option<Tree>,
     remote_age: Option<u64>,
-    shown_plan: Option<Plan>,
+    remote_root: Option<String>,
+    shown_plan: Option<(Plan, Preview)>,
 }
 
 type State<'a> = tauri::State<'a, Mutex<AppState>>;
@@ -35,6 +40,29 @@ struct DeviceView {
     address: Option<String>,
     applied_revision: Option<u64>,
     applied_at: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HoldView {
+    folder: String,
+    /// The rule path the folder belongs to, when it can be found.
+    rel: Option<String>,
+    deletes: usize,
+    at: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WatchView {
+    running: bool,
+    gate_open: bool,
+    reason: Option<String>,
+    metered: bool,
+    relayed: bool,
+    allow_metered: bool,
+    allow_relay: bool,
+    holds: Vec<HoldView>,
 }
 
 #[derive(Serialize)]
@@ -63,6 +91,7 @@ struct View {
     remote_entries: Option<usize>,
     remote_list_age: Option<u64>,
     always_ignore: Vec<String>,
+    watch: Option<WatchView>,
 }
 
 #[derive(Serialize)]
@@ -90,6 +119,7 @@ struct NodeView {
 #[serde(rename_all = "camelCase")]
 struct PlanView {
     plan: Plan,
+    preview: Preview,
     edits: Vec<EditView>,
 }
 
@@ -106,24 +136,15 @@ fn open(st: &mut AppState) -> Result<(), String> {
 
 fn ensure_trees(st: &mut AppState) -> Result<(), String> {
     let s = st.session.as_ref().unwrap();
-    let rules = s.working().map_err(err)?;
     if st.local.is_none() {
-        let entries = index::scan(&s.local.root, &rules.always_ignore).map_err(err)?;
-        index::write(&s.control.index_path(&s.ctx.me), &entries).map_err(err)?;
-        st.local = Some(Tree::new(entries));
+        st.local = Some(Tree::new(s.scan_here().map_err(err)?));
     }
     if st.remote.is_none()
-        && let Some(other) = s.other_device(&rules)
+        && let Some((list, age)) = s.other_list()
     {
-        let p = s.control.index_path(&other);
-        if let Ok(entries) = index::read(&p) {
-            st.remote_age = std::fs::metadata(&p)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .map(|d| d.as_secs());
-            st.remote = Some(Tree::new(entries));
-        }
+        st.remote_age = age;
+        st.remote_root = list.root;
+        st.remote = Some(Tree::new(list.entries));
     }
     Ok(())
 }
@@ -159,6 +180,7 @@ fn view(st: &mut AppState) -> View {
         remote_entries: None,
         remote_list_age: None,
         always_ignore: Vec::new(),
+        watch: None,
     };
     if let Err(e) = open(st) {
         v.message = Some(e);
@@ -201,6 +223,22 @@ fn view(st: &mut AppState) -> View {
     v.root_mode = Some(working.root.to_string());
     v.edits = edits(Some(&shared), &working);
     v.always_ignore = working.always_ignore.clone();
+    let w = watch::read_state(&s.dir);
+    let rels: Vec<String> = std::iter::once(String::new()).chain(working.rules.keys().cloned()).collect();
+    v.watch = Some(WatchView {
+        running: w.alive_at + 120 >= now_secs(),
+        gate_open: w.gate.open,
+        reason: w.gate.reason.clone(),
+        metered: w.gate.metered,
+        relayed: w.gate.relayed,
+        allow_metered: s.local.allow_metered,
+        allow_relay: s.local.allow_relay,
+        holds: w
+            .holds
+            .iter()
+            .map(|h| HoldView { folder: h.folder.clone(), rel: rels.iter().find(|r| folder_id(r) == h.folder).cloned(), deletes: h.deletes, at: h.at })
+            .collect(),
+    });
     v.stage = "ready";
     if let Err(e) = ensure_trees(st) {
         v.message = Some(e);
@@ -295,20 +333,28 @@ async fn discard(state: State<'_>) -> Result<View, String> {
 async fn plan(state: State<'_>) -> Result<PlanView, String> {
     let mut st = state.lock().unwrap();
     open(&mut st)?;
+    // The preview must use the folder as it is now, and the newest list from the other side.
+    st.local = None;
+    st.remote = None;
+    ensure_trees(&mut st)?;
     let s = st.session.as_ref().unwrap();
     let (rules, plan) = s.plan().map_err(err)?;
     let shared = s.shared().map_err(err)?;
     let edits = edits(shared.as_ref(), &rules);
-    st.shown_plan = Some(plan.clone());
-    Ok(PlanView { plan, edits })
+    let empty = Tree::default();
+    let here = st.local.as_ref().unwrap_or(&empty);
+    let there = st.remote.as_ref().map(|t| (t, st.remote_root.as_deref()));
+    let preview = s.preview(&rules, &plan, here, there);
+    st.shown_plan = Some((plan.clone(), preview.clone()));
+    Ok(PlanView { plan, preview, edits })
 }
 
 #[tauri::command]
-async fn apply(state: State<'_>) -> Result<Report, String> {
+async fn apply(state: State<'_>, guard_confirmed: bool) -> Result<Report, String> {
     let mut st = state.lock().unwrap();
     open(&mut st)?;
-    let shown = st.shown_plan.take().ok_or("review the plan first")?;
-    st.session.as_ref().unwrap().apply(&shown).map_err(err)
+    let (plan, preview) = st.shown_plan.take().ok_or("review the plan first")?;
+    st.session.as_ref().unwrap().apply(&plan, &preview, guard_confirmed).map_err(err)
 }
 
 #[tauri::command]
@@ -318,7 +364,7 @@ async fn init(state: State<'_>, root: String) -> Result<View, String> {
     if !root.is_absolute() || !root.is_dir() {
         return Err(format!("{} is not an existing folder", root.display()));
     }
-    LocalConfig { root, syncthing_home: None }.save(&config_dir()).map_err(err)?;
+    LocalConfig { root, ..Default::default() }.save(&config_dir()).map_err(err)?;
     *st = AppState::default();
     Ok(view(&mut st))
 }
@@ -331,11 +377,35 @@ async fn create_rules(state: State<'_>, other_os: Os) -> Result<View, String> {
     Ok(view(&mut st))
 }
 
+#[tauri::command]
+async fn set_allow(state: State<'_>, what: String, on: bool) -> Result<View, String> {
+    let mut st = state.lock().unwrap();
+    let dir = config_dir();
+    let mut cfg = LocalConfig::load(&dir).map_err(err)?;
+    match what.as_str() {
+        "metered" => cfg.allow_metered = on,
+        "relay" => cfg.allow_relay = on,
+        _ => return Err(format!("unknown setting {what}")),
+    }
+    cfg.save(&dir).map_err(err)?;
+    st.session = None;
+    Ok(view(&mut st))
+}
+
+#[tauri::command]
+async fn resume(state: State<'_>, folder: String) -> Result<View, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    let s = st.session.as_ref().unwrap();
+    watch::release_hold(&s.dir, &s.client, &folder).map_err(err)?;
+    Ok(view(&mut st))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(AppState::default()))
-        .invoke_handler(tauri::generate_handler![state, refresh, children, set_rule, discard, plan, apply, init, create_rules])
+        .invoke_handler(tauri::generate_handler![state, refresh, children, set_rule, discard, plan, apply, init, create_rules, set_allow, resume])
         .run(tauri::generate_context!())
         .expect("error while running Setu");
 }

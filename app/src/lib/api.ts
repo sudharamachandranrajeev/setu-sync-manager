@@ -19,6 +19,24 @@ export interface EditView {
   after: string | null
 }
 
+export interface HoldView {
+  folder: string
+  rel: string | null
+  deletes: number
+  at: number
+}
+
+export interface WatchView {
+  running: boolean
+  gateOpen: boolean
+  reason: string | null
+  metered: boolean
+  relayed: boolean
+  allowMetered: boolean
+  allowRelay: boolean
+  holds: HoldView[]
+}
+
 export interface View {
   stage: 'setup' | 'rules' | 'ready'
   message: string | null
@@ -33,6 +51,7 @@ export interface View {
   remoteEntries: number | null
   remoteListAge: number | null
   alwaysIgnore: string[]
+  watch: WatchView | null
 }
 
 export interface Side {
@@ -70,8 +89,43 @@ export interface Plan {
   folders: number
 }
 
+export interface Count {
+  files: number
+  bytes: number
+}
+
+export type Change =
+  | 'send'
+  | 'receive'
+  | 'staysHere'
+  | 'staysThere'
+  | { replace: { winnerHere: boolean } }
+
+export interface Group {
+  rel: string
+  mode: string
+  send: Count
+  receive: Count
+  replacedHere: Count
+  replacedThere: Count
+  staysHere: Count
+  staysThere: Count
+  same: Count
+  filesHere: number
+  filesThere: number
+  samples: { path: string; change: Change; size: number }[]
+}
+
+export interface Preview {
+  groups: Group[]
+  guard: string[]
+  windowsNames: Problem[]
+  otherUnknown: boolean
+}
+
 export interface PlanView {
   plan: Plan
+  preview: Preview
   edits: EditView[]
 }
 
@@ -88,7 +142,9 @@ export const api = {
   setRule: (path: string, dir: boolean, mode: string | null) => invoke<View>('set_rule', { path, dir, mode }),
   discard: () => invoke<View>('discard'),
   plan: () => invoke<PlanView>('plan'),
-  apply: () => invoke<Report>('apply'),
+  apply: (guardConfirmed: boolean) => invoke<Report>('apply', { guardConfirmed }),
   init: (root: string) => invoke<View>('init', { root }),
+  setAllow: (what: 'metered' | 'relay', on: boolean) => invoke<View>('set_allow', { what, on }),
+  resume: (folder: string) => invoke<View>('resume', { folder }),
   createRules: (otherOs: Os) => invoke<View>('create_rules', { otherOs }),
 }

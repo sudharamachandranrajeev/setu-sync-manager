@@ -148,6 +148,11 @@ fn two_computers_sync_by_the_rules() {
     put(&ra, "loose.txt", "loose");
     put(&ra, "we[ird]/w.txt", "weird name");
     put(&rb, "fromb/b.txt", "from B");
+    // Files that differ before the first sync.
+    put(&ra, "shared/pre.txt", "A version");
+    put(&rb, "shared/pre.txt", "B version");
+    put(&ra, "both/pre.txt", "A version");
+    put(&rb, "both/pre.txt", "B version");
     put(&rb, "both/y.txt", "y");
 
     let mut devices = BTreeMap::new();
@@ -178,6 +183,25 @@ fn two_computers_sync_by_the_rules() {
     for (root, rel) in [(&rb, "shared/a.txt"), (&rb, "both/x.txt"), (&rb, "mixed/keep.txt"), (&rb, "loose.txt"), (&rb, "we[ird]/w.txt"), (&ra, "fromb/b.txt"), (&ra, "both/y.txt")] {
         assert!(wait_for(90, || read(root, rel)).is_some(), "{rel} never arrived in {}", root.display());
     }
+    // A file that differed before the first sync is never lost: the winner takes its place and
+    // the loser is kept beside it as a conflict copy.
+    let kept = |root: &Path, dir: &str, text: &str| {
+        std::fs::read_dir(root.join(dir)).unwrap().filter_map(|e| e.ok()).any(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("pre.sync-conflict-") && std::fs::read_to_string(e.path()).ok().as_deref() == Some(text)
+        })
+    };
+    assert!(wait_for(60, || (read(&rb, "shared/pre.txt").as_deref() == Some("A version")).then_some(())).is_some(), "sender's copy must win one way");
+    assert!(wait_for(30, || kept(&rb, "shared", "B version").then_some(())).is_some(), "receiver's old copy must be kept");
+    assert!(
+        wait_for(60, || {
+            let (x, y) = (read(&ra, "both/pre.txt")?, read(&rb, "both/pre.txt")?);
+            let loser = if x == "A version" { "B version" } else { "A version" };
+            (x == y && kept(&ra, "both", loser) && kept(&rb, "both", loser)).then_some(())
+        })
+        .is_some(),
+        "both ways: one copy wins, the other is kept on both sides"
+    );
     // What should not, did not.
     for rel in ["mixed/skip.txt", "aonly/sec.txt", "shared/API keys/k.txt"] {
         assert!(read(&rb, rel).is_none(), "{rel} must not reach B");
@@ -209,6 +233,36 @@ fn two_computers_sync_by_the_rules() {
     let blocked = apply::plan(&ca, &rs, &a.client).unwrap();
     assert!(blocked.problems.iter().any(|p| p.message.contains("overlaps")), "{:?}", blocked.problems);
     a.client.delete_folder("stray").unwrap();
+
+    // Delete guard: B runs the watcher; A deletes many files at once in a folder B receives.
+    for i in 0..70 {
+        put(&ra, &format!("shared/many/{i}.txt"), "x");
+    }
+    let _ = a.client.scan(&setu_core::compile::folder_id("shared"));
+    assert!(wait_for(90, || read(&rb, "shared/many/69.txt")).is_some(), "bulk files never arrived");
+    let wdir = db.join("watch-config");
+    std::fs::create_dir_all(&wdir).unwrap();
+    let bhome = db.join("home");
+    {
+        let wdir = wdir.clone();
+        let root = rb.clone();
+        std::thread::spawn(move || {
+            let c = Client::discover(Some(&bhome)).unwrap();
+            let cfg = move || Ok(setu_core::local::LocalConfig { root: root.clone(), allow_metered: true, allow_relay: true, ..Default::default() });
+            let _ = setu_core::watch::run(&wdir, cfg, &c);
+        });
+    }
+    assert!(wait_for(30, || (setu_core::watch::read_state(&wdir).alive_at > 0).then_some(())).is_some(), "watcher never started");
+    std::fs::remove_dir_all(ra.join("shared/many")).unwrap();
+    let _ = a.client.scan(&setu_core::compile::folder_id("shared"));
+    let held = wait_for(90, || setu_core::watch::read_state(&wdir).holds.first().cloned()).expect("delete guard never held the folder");
+    assert_eq!(held.folder, setu_core::compile::folder_id("shared"));
+    let paused = b.client.folders().unwrap().iter().any(|f| f["id"] == held.folder.as_str() && f["paused"] == true);
+    assert!(paused, "held folder must be paused on B");
+    let left = (0..70).filter(|i| read(&rb, &format!("shared/many/{i}.txt")).is_some()).count();
+    assert!(left > 0, "the guard should stop deletions before all 70 are gone");
+    setu_core::watch::release_hold(&wdir, &b.client, &held.folder).unwrap();
+    assert!(b.client.folders().unwrap().iter().any(|f| f["id"] == held.folder.as_str() && f["paused"] == false));
 
     // Revision 2: switch "both" off. The folder goes from Syncthing; its files stay on both sides.
     rs.set("both", Kind::Dir, None).unwrap();

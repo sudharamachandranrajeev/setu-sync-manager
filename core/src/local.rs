@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalConfig {
     /// The folder this computer syncs (for example `~/Work` or `C:\AI\Claude`).
@@ -14,6 +14,12 @@ pub struct LocalConfig {
     /// Where Syncthing's config lives, when not in its usual place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syncthing_home: Option<PathBuf>,
+    /// Let Setu's folders sync on a metered network (off by default).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_metered: bool,
+    /// Let Setu's folders sync when the link goes through a Tailscale relay (off by default).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_relay: bool,
 }
 
 /// `SETU_CONFIG_DIR`, else `%APPDATA%\Setu` on Windows, else `$XDG_CONFIG_HOME/setu`.

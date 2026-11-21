@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { api, type NodeView, type Os, type PlanView, type Report, type View } from './lib/api'
   import DirPicker from './lib/DirPicker.svelte'
+  import FirstSync from './lib/FirstSync.svelte'
   import PlanSheet from './lib/PlanSheet.svelte'
   import Tree, { type Row } from './lib/Tree.svelte'
   import { ago, bytes, dirOf, modeOf, sentence, shortLabel, type Dir } from './lib/format'
@@ -15,6 +16,7 @@
   let toast = $state<string | null>(null)
   let rootInput = $state('')
   let otherOs = $state<Os>('windows')
+  let guide = $state(false)
 
   const me = $derived(view?.me ?? null)
   const other = $derived(view?.other ?? null)
@@ -107,7 +109,25 @@
     }
   }
 
+  async function allow(what: 'metered' | 'relay', on: boolean) {
+    try {
+      view = await api.setAllow(what, on)
+    } catch (e) {
+      fail(e)
+    }
+  }
+
+  async function resume(folder: string) {
+    try {
+      view = await api.resume(folder)
+      say('Folder resumed.')
+    } catch (e) {
+      fail(e)
+    }
+  }
+
   async function review() {
+    guide = false
     try {
       plan = await api.plan()
     } catch (e) {
@@ -115,10 +135,10 @@
     }
   }
 
-  async function apply() {
+  async function apply(guardConfirmed: boolean) {
     busy = true
     try {
-      const r: Report = await api.apply()
+      const r: Report = await api.apply(guardConfirmed)
       plan = null
       await boot(await api.refresh())
       say(`Applied. ${r.added} added, ${r.updated} changed, ${r.removed} removed.`)
@@ -204,6 +224,7 @@
     {/if}
     <div class="grow"></div>
     {#if view?.stage === 'ready'}
+      <button class="btn" onclick={() => (guide = true)} title="Go through the top folders one at a time">First-sync guide</button>
       <button class="btn" onclick={refresh} title="Read the folders again (F5)">Refresh</button>
     {/if}
   </header>
@@ -218,6 +239,29 @@
     <div class="banner warn">
       The rules file was changed on both computers at once. Setu kept one; the other is saved as
       {view.conflicts.join(', ')}. Check your choices, then apply again.
+    </div>
+  {/if}
+
+  {#each view?.watch?.holds ?? [] as h (h.folder)}
+    <div class="banner bad" role="alert">
+      <span>
+        <b>{h.rel === null ? h.folder : h.rel || 'The whole folder'}</b> is paused here: {h.deletes} files were deleted on
+        {other?.name ?? 'the other computer'} within two minutes. Check that this was meant. Deleted files are kept for 30 days in
+        the folder's <span class="mono">.stversions</span>.
+      </span>
+      <button class="btn" onclick={() => resume(h.folder)}>Resume syncing</button>
+    </div>
+  {/each}
+  {#if view?.stage === 'ready' && view.watch && view.watch.running && !view.watch.gateOpen}
+    <div class="banner warn">
+      <span>Syncing is on hold here: {view.watch.reason}. Setu's folders resume when the network is fine again.</span>
+      {#if view.watch.metered && !view.watch.allowMetered}<button class="btn" onclick={() => allow('metered', true)}>Allow on metered network</button>{/if}
+      {#if view.watch.relayed && !view.watch.allowRelay}<button class="btn" onclick={() => allow('relay', true)}>Allow through relay</button>{/if}
+    </div>
+  {/if}
+  {#if view?.stage === 'ready' && view.watch && !view.watch.running}
+    <div class="banner warn">
+      <span>Setu's background helper is not running, so the network gate and the delete guard are off. It starts at logon once installed (<span class="mono">setu-watch</span>).</span>
     </div>
   {/if}
 
@@ -300,6 +344,14 @@
             <p class="mono small">API keys · .env · keystores · {view.alwaysIgnore.map((x) => x.replace('(?d)', '')).join(' · ')}</p>
           </div>
           <p class="muted small">{other.name}'s file list: {ago(view.remoteListAge)}</p>
+          {#if view.watch}
+            <div class="never">
+              <h3>Network</h3>
+              <label class="tog"><input type="checkbox" checked={view.watch.allowMetered} onchange={(e) => allow('metered', (e.currentTarget as HTMLInputElement).checked)} /> Sync on metered networks</label>
+              <label class="tog"><input type="checkbox" checked={view.watch.allowRelay} onchange={(e) => allow('relay', (e.currentTarget as HTMLInputElement).checked)} /> Sync through a relay (slower, uses more data)</label>
+              <p class="muted small">Now: {view.watch.running ? `${view.watch.metered ? 'metered' : 'not metered'}, ${view.watch.relayed ? 'relayed link' : 'direct link'}` : 'helper not running'}</p>
+            </div>
+          {/if}
         {/if}
       </aside>
     </main>
@@ -321,6 +373,17 @@
   {/if}
 
   {#if toast}<div class="toast" role="status">{toast}</div>{/if}
+  {#if guide && me && other && view}
+    <FirstSync
+      folders={rows.filter((r) => r.depth === 0 && r.node.dir).map((r) => r.node)}
+      {me}
+      {other}
+      remoteKnown={view.remoteEntries !== null}
+      onpick={(n, d) => pick(n.path, true, d)}
+      onclose={() => (guide = false)}
+      onreview={review}
+    />
+  {/if}
   {#if plan && me && other}
     <PlanSheet view={plan} {me} {other} {busy} onclose={() => (plan = null)} onapply={apply} />
   {/if}
@@ -621,6 +684,13 @@
   .never p {
     margin: 4px 0 0;
     overflow-wrap: anywhere;
+  }
+  .tog {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 6px 0;
+    font-size: 13px;
   }
   .bar {
     display: flex;

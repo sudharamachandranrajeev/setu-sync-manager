@@ -14,6 +14,7 @@ use crate::apply::{self, Ctx, Plan, Report};
 use crate::control::Control;
 use crate::index;
 use crate::local::{config_dir, write_atomic, LocalConfig};
+use crate::preview::{self, Preview};
 use crate::rules::{Device, Os, RuleSet};
 use crate::syncthing::Client;
 use crate::Error;
@@ -114,8 +115,12 @@ impl Session {
         Ok((rules, plan))
     }
 
-    /// Apply, but only if the plan is still exactly the one that was shown and confirmed.
-    pub fn apply(&self, confirmed: &Plan) -> Result<Report, Error> {
+    /// Apply, but only if the plan is still exactly the one that was shown and confirmed, and any
+    /// guard reasons in the shown preview were confirmed a second time.
+    pub fn apply(&self, confirmed: &Plan, preview: &Preview, guard_confirmed: bool) -> Result<Report, Error> {
+        if !preview.guard.is_empty() && !guard_confirmed {
+            return Err(Error::Rules(format!("this change needs a second confirmation: {}", preview.guard.join("; "))));
+        }
         let (rules, plan) = self.plan()?;
         if plan.actions != confirmed.actions || plan.revision != confirmed.revision {
             return Err(Error::Rules("something changed since the plan was shown; review it again".into()));
@@ -166,12 +171,31 @@ impl Session {
         Ok(rs)
     }
 
-    /// Write this computer's file list to the control folder. Returns how many entries.
-    pub fn write_index(&self) -> Result<usize, Error> {
+    /// Scan this computer's folder and publish the list to the control folder.
+    pub fn scan_here(&self) -> Result<Vec<index::Entry>, Error> {
         let rules = self.working()?;
         let entries = index::scan(&self.local.root, &rules.always_ignore)?;
-        index::write(&self.control.index_path(&self.ctx.me), &entries)?;
-        Ok(entries.len())
+        index::write(&self.control.index_path(&self.ctx.me), &entries, &self.local.root.to_string_lossy())?;
+        Ok(entries)
+    }
+
+    /// The other computer's latest file list and its age in seconds, if it has arrived.
+    pub fn other_list(&self) -> Option<(index::List, Option<u64>)> {
+        let other = self.other_device(&self.working().ok()?)?;
+        let p = self.control.index_path(&other);
+        let list = index::read(&p).ok()?;
+        let age = std::fs::metadata(&p).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map(|d| d.as_secs());
+        Some((list, age))
+    }
+
+    /// What applying `rules` does to files, given both lists. Adds a guard reason when folders
+    /// would be added but the other computer's list is unknown.
+    pub fn preview(&self, rules: &RuleSet, plan: &Plan, here: &index::Tree, there: Option<(&index::Tree, Option<&str>)>) -> Preview {
+        let mut p = preview::preview(rules, &self.ctx.me, here, there.map(|t| t.0), there.and_then(|t| t.1).map(|r| r.chars().count()));
+        if p.other_unknown && plan.actions.iter().any(|a| matches!(a, apply::Action::Add { .. })) {
+            p.guard.push("The other computer's file list has not arrived, so changes on that side cannot be shown. Open Setu there first, or confirm to go ahead without it.".into());
+        }
+        p
     }
 
     pub fn other_device(&self, rules: &RuleSet) -> Option<String> {

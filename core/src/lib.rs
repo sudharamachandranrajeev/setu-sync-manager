@@ -7,9 +7,11 @@ pub mod compile;
 pub mod control;
 pub mod index;
 pub mod local;
+pub mod preview;
 pub mod rules;
 pub mod session;
 pub mod syncthing;
+pub mod watch;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

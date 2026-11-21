@@ -77,9 +77,10 @@ pub fn scan(root: &Path, always_ignore: &[String]) -> Result<Vec<Entry>, Error> 
     Ok(out)
 }
 
-pub fn write(path: &Path, entries: &[Entry]) -> Result<(), Error> {
+/// Write the list. `root` is this computer's folder, so the other computer can check path lengths.
+pub fn write(path: &Path, entries: &[Entry], root: &str) -> Result<(), Error> {
     let mut gz = GzEncoder::new(Vec::new(), Compression::default());
-    writeln!(gz, "setu-index\t1")?;
+    writeln!(gz, "setu-index\t1\t{}", root.replace(['\t', '\n', '\r'], " "))?;
     for e in entries {
         writeln!(gz, "{}\t{}\t{}\t{}", if e.dir { 'd' } else { 'f' }, e.size, e.mtime, e.path)?;
     }
@@ -90,13 +91,20 @@ pub fn write(path: &Path, entries: &[Entry]) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn read(path: &Path) -> Result<Vec<Entry>, Error> {
+/// A file list read back: the other computer's folder (when it wrote one) and its entries.
+pub struct List {
+    pub root: Option<String>,
+    pub entries: Vec<Entry>,
+}
+
+pub fn read(path: &Path) -> Result<List, Error> {
     let f = std::fs::File::open(path)?;
     let mut lines = BufReader::new(GzDecoder::new(f)).lines();
-    match lines.next() {
-        Some(Ok(h)) if h == "setu-index\t1" => {}
+    let root = match lines.next() {
+        Some(Ok(h)) if h == "setu-index\t1" => None,
+        Some(Ok(h)) if h.starts_with("setu-index\t1\t") => Some(h["setu-index\t1\t".len()..].to_string()).filter(|r| !r.is_empty()),
         _ => return Err(Error::Setup(format!("{} is not a Setu file list", path.display()))),
-    }
+    };
     let mut out = Vec::new();
     for line in lines {
         let line = line?;
@@ -109,7 +117,7 @@ pub fn read(path: &Path) -> Result<Vec<Entry>, Error> {
             mtime: mtime.parse().unwrap_or(0),
         });
     }
-    Ok(out)
+    Ok(List { root, entries: out })
 }
 
 /// Entries grouped by parent directory, with each directory's total size.
@@ -189,8 +197,10 @@ mod tests {
         let paths: Vec<&str> = e.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, vec!["a", "a/f.txt"]);
         let f = d.path().join("i.tsv.gz");
-        write(&f, &e).unwrap();
-        assert_eq!(read(&f).unwrap(), e);
+        write(&f, &e, "C:\\Work").unwrap();
+        let back = read(&f).unwrap();
+        assert_eq!(back.entries, e);
+        assert_eq!(back.root.as_deref(), Some("C:\\Work"));
         let t = Tree::new(e);
         assert_eq!(t.total(""), (5, 1));
         assert_eq!(t.children("a").count(), 1);
