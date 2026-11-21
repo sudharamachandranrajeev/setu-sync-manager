@@ -1,26 +1,30 @@
 <script lang="ts">
-  import { glyph, shortLabel, type Dir } from './format'
+  import { choiceLabel, glyph, type Dir } from './format'
 
   let {
     value,
     allowed = ['off', 'both', 'out', 'in'],
-    meName,
-    otherName,
+    there,
     onpick,
   }: {
     value: Dir
     allowed?: Dir[]
-    meName: string
-    otherName: string
+    /** Everyday name of the other computer. */
+    there: string
     onpick: (d: Dir) => void
   } = $props()
 
-  const order: Dir[] = ['off', 'out', 'both', 'in']
-  const title = (d: Dir) =>
-    ({ off: 'Off', out: `${meName} → ${otherName}`, both: 'Both ways', in: `${otherName} → ${meName}` })[d]
+  const order: Dir[] = ['in', 'out', 'both', 'off']
+  const hint = (d: Dir) =>
+    ({
+      in: `${there} → this computer`,
+      out: `This computer → ${there}`,
+      both: 'Same files on both',
+      off: 'Leave it out',
+    })[d]
 </script>
 
-<div class="seg" role="radiogroup" aria-label="Direction">
+<div class="list" role="radiogroup" aria-label="How to sync">
   {#each order as d (d)}
     <button
       role="radio"
@@ -28,19 +32,19 @@
       class="opt {d}"
       class:on={value === d}
       disabled={!allowed.includes(d)}
-      title={title(d)}
       onclick={() => onpick(d)}
     >
-      <span class="g">{glyph[d]}</span>
-      <span class="t">{shortLabel(d)}</span>
+      <span class="g" aria-hidden="true">{glyph[d]}</span>
+      <span class="t">{choiceLabel(d, there)}</span>
+      <span class="h">{hint(d)}</span>
     </button>
   {/each}
 </div>
 
 <style>
-  .seg {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
+  .list {
+    display: flex;
+    flex-direction: column;
     gap: 4px;
     padding: 4px;
     border-radius: 12px;
@@ -48,32 +52,39 @@
     border: 1px solid var(--line);
   }
   .opt {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: 24px 1fr;
+    grid-template-rows: auto auto;
+    column-gap: 8px;
     align-items: center;
-    gap: 2px;
-    padding: 8px 4px;
+    padding: 7px 10px;
     border-radius: 9px;
+    text-align: left;
     color: var(--muted);
     transition:
       background 140ms ease,
-      color 140ms ease,
-      transform 100ms ease;
+      color 140ms ease;
   }
-  .opt:active:not(:disabled) {
-    transform: scale(0.97);
+  .opt:disabled {
+    opacity: 0.45;
   }
   .opt:hover:not(:disabled):not(.on) {
     background: var(--surface);
     color: var(--text);
   }
   .g {
+    grid-row: span 2;
     font-size: 18px;
     line-height: 1;
+    text-align: center;
   }
   .t {
-    font-size: 12px;
-    font-weight: 600;
+    font-size: 13px;
+    font-weight: 650;
+  }
+  .h {
+    font-size: 11.5px;
+    opacity: 0.85;
   }
   .on {
     background: var(--surface);

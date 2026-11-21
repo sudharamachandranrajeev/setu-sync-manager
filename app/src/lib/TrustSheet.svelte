@@ -4,19 +4,18 @@
 
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { api, type Conflict, type DeviceView, type FolderCheck, type Kept } from './api'
-  import { bytes } from './format'
+  import { api, type Conflict, type FolderCheck, type Kept } from './api'
+  import { bytes, stateWord } from './format'
 
   let {
     tab = $bindable(),
-    me,
-    other,
+    there,
     onclose,
     onchanged,
   }: {
     tab: TrustTab
-    me: DeviceView
-    other: DeviceView
+    /** Everyday name of the other computer. */
+    there: string
     onclose: () => void
     /** Something on disk changed: the tree should reload. */
     onchanged: (message: string) => void
@@ -63,7 +62,7 @@
     try {
       conflicts = await api.keep(c.copy, keepCopy)
       versions = null
-      onchanged(`Kept the ${keepCopy ? 'conflict copy' : 'current file'} of ${nameOf(c.original)}. The other one is in .stversions.`)
+      onchanged(`Kept the ${keepCopy ? 'other version' : 'current version'} of ${nameOf(c.original)}. The one you didn't pick is under Old versions.`)
     } catch (e) {
       error = String(e)
     } finally {
@@ -80,8 +79,8 @@
       versions = await api.versions()
       onchanged(
         r === 'inPlace'
-          ? `Restored ${nameOf(k.rel)}. The file it replaced is kept as a version.`
-          : `${me.name} only receives this folder, so the old copy was saved beside it as ${nameOf(r.beside)}.`,
+          ? `Put back ${nameOf(k.rel)}. The version it replaced is kept under Old versions.`
+          : `This folder only receives from ${there}, so the old copy was saved next to the file as ${nameOf(r.beside)}.`,
       )
     } catch (e) {
       error = String(e)
@@ -98,17 +97,18 @@
   })
 
   const allOk = $derived(checks !== null && checks.length > 0 && checks.every((c) => c.ok))
-  const typeLabel = (t: string) => ({ sendonly: 'sends', receiveonly: 'receives', sendreceive: 'both ways' })[t] ?? t
+  const typeLabel = (t: string) =>
+    ({ sendonly: `this computer → ${there}`, receiveonly: `${there} → this computer`, sendreceive: 'both ways' })[t] ?? t
 </script>
 
 <div class="scrim" role="presentation" onclick={onclose}></div>
-<div class="sheet" role="dialog" aria-modal="true" aria-label="Conflicts, versions and check">
+<div class="sheet" role="dialog" aria-modal="true" aria-label="Conflicts, old versions and sync check">
   <div class="tabs" role="tablist" tabindex="-1">
     <button role="tab" aria-selected={tab === 'conflicts'} class:on={tab === 'conflicts'} onclick={() => show('conflicts')}>
       Conflicts{#if conflicts?.length}<span class="count">{conflicts.length}</span>{/if}
     </button>
     <button role="tab" aria-selected={tab === 'versions'} class:on={tab === 'versions'} onclick={() => show('versions')}>Old versions</button>
-    <button role="tab" aria-selected={tab === 'check'} class:on={tab === 'check'} onclick={() => show('check')}>Check</button>
+    <button role="tab" aria-selected={tab === 'check'} class:on={tab === 'check'} onclick={() => show('check')}>Is it all copied?</button>
     <div class="grow"></div>
     <button class="close" onclick={onclose} aria-label="Close">✕</button>
   </div>
@@ -118,34 +118,34 @@
 
     {#if tab === 'conflicts'}
       <p class="muted lead">
-        When a file changed on both computers, Syncthing keeps both: the newer one under the normal name, and the other as a
-        <span class="mono">.sync-conflict-</span> copy. Pick the one to keep. The other goes to the folder's
-        <span class="mono">.stversions</span>; nothing is deleted.
+        A conflict happens when the same file was edited on both computers before they could catch up. Both versions are
+        kept: the newer one under the normal name, the other with <span class="mono">sync-conflict</span> in its name. Pick
+        the one to keep. The other one moves to Old versions, so nothing is lost.
       </p>
       {#if conflicts === null}
         <p class="muted">Looking…</p>
       {:else if conflicts.length === 0}
-        <p class="empty">No conflict copies. Every synced file has one version.</p>
+        <p class="empty">No conflicts. Nothing was edited on both computers at once.</p>
       {:else}
         <ul class="list">
           {#each conflicts as c (c.copy)}
             <li class="conflict">
               <div class="name">
                 <b>{nameOf(c.original)}</b>
-                <span class="mono muted small">{dirName(c.original) || '(top folder)'}</span>
+                <span class="mono muted small">{dirName(c.original) || '(top level)'}</span>
               </div>
               <div class="pair">
                 <div class="side">
-                  <span class="label">Current file</span>
+                  <span class="label">Current version</span>
                   {#if c.originalSize !== null}
                     <span>{bytes(c.originalSize)} · {when(c.originalMtime)}</span>
                     <button class="btn" disabled={working !== null} onclick={() => keep(c, false)}>Keep this</button>
                   {:else}
-                    <span class="muted">gone</span>
+                    <span class="muted">deleted</span>
                   {/if}
                 </div>
                 <div class="side">
-                  <span class="label">Conflict copy</span>
+                  <span class="label">Other version</span>
                   <span>{bytes(c.copySize)} · {when(c.copyMtime)}</span>
                   <button class="btn" disabled={working !== null} onclick={() => keep(c, true)}>Keep this</button>
                 </div>
@@ -156,62 +156,63 @@
       {/if}
     {:else if tab === 'versions'}
       <p class="muted lead">
-        Each Setu folder keeps replaced and deleted files for 30 days. Restoring puts the old copy back; the file it replaces
-        becomes a version itself. In a folder {me.name} only receives, the old copy is saved beside the file instead, so
-        {other.name} does not overwrite it.
+        When a synced file is changed or deleted, its old copy is kept here for 30 days. <b>Put back</b> brings an old copy
+        back, and the version it replaces is kept here too. In a folder that only receives from {there}, the old copy is
+        saved next to the file instead, so {there} does not overwrite it.
       </p>
-      <input type="search" placeholder="Filter by path" bind:value={filter} />
+      <input type="search" placeholder="Search by file name or folder" bind:value={filter} />
       {#if versions === null}
         <p class="muted">Looking…</p>
       {:else if versions.length === 0}
-        <p class="empty">No old versions kept yet.</p>
+        <p class="empty">Nothing kept yet. Old copies appear here once synced files are changed or deleted.</p>
       {:else}
         <ul class="list">
           {#each shown as k (k.folder + k.path + k.versionTime)}
             <li class="row">
               <div class="name">
                 <b>{nameOf(k.rel)}</b>
-                <span class="mono muted small">{dirName(k.rel) || '(top folder)'}</span>
+                <span class="mono muted small">{dirName(k.rel) || '(top level)'}</span>
               </div>
-              <span class="small muted nowrap" title="Last changed {whenIso(k.modTime)}">kept {whenIso(k.versionTime)}</span>
+              <span class="small muted nowrap" title="This copy was last edited {whenIso(k.modTime)}">replaced {whenIso(k.versionTime)}</span>
               <span class="small nowrap">{bytes(k.size)}</span>
               <button class="btn" disabled={working !== null} onclick={() => restore(k)}>
-                {working === k.folder + k.path + k.versionTime ? 'Restoring…' : 'Restore'}
+                {working === k.folder + k.path + k.versionTime ? 'Putting back…' : 'Put back'}
               </button>
             </li>
           {/each}
         </ul>
         {#if shown.length < (filter ? versions.filter((v) => v.rel.toLowerCase().includes(filter.trim().toLowerCase())).length : versions.length)}
-          <p class="muted small">Showing the newest 500. Filter to find older ones.</p>
+          <p class="muted small">Showing the newest 500. Search to find older ones.</p>
         {/if}
       {/if}
     {:else}
       <p class="muted lead">
-        Syncthing compares every file block by block (SHA-256). A folder is complete here when it is idle, needs nothing from
-        {other.name}, and has no errors. The other computer's own view is shown beside it.
+        Syncthing checks every file piece by piece, so "all copied" means the files are truly identical, not only the same
+        name and size. A folder gets a tick when this computer has nothing left to copy and no errors. The percentage shows
+        how far {there} is.
       </p>
       {#if checks === null}
         <p class="muted">Checking…</p>
       {:else if checks.length === 0}
-        <p class="empty">No folders sync yet. Choose what goes where and press Apply.</p>
+        <p class="empty">Nothing syncs yet. Use Quick setup or choose folders in the list, then press Start syncing.</p>
       {:else}
-        {#if allOk}<p class="box okbox">All {checks.length} folders are complete on {me.name}.</p>{/if}
+        {#if allOk}<p class="box okbox">All copied. All {checks.length} synced folders are complete on this computer.</p>{/if}
         <ul class="list">
           {#each checks as c (c.id)}
             <li class="check">
               <span class="mark" class:ok={c.ok}>{c.ok ? '✓' : '!'}</span>
               <div class="name">
-                <b>{c.rel || 'Whole folder'}</b>
+                <b>{c.rel || 'Everything (top level)'}</b>
                 <span class="small muted">
-                  {typeLabel(c.folderType)} · {c.state}
-                  {#if c.needFiles}· needs {c.needFiles.toLocaleString()} files ({bytes(c.needBytes)}){/if}
-                  {#if c.otherCompletion !== null}· {other.name} {Math.floor(c.otherCompletion)} %{/if}
+                  {typeLabel(c.folderType)} · {stateWord(c.state)}
+                  {#if c.needFiles}· {c.needFiles.toLocaleString()} files ({bytes(c.needBytes)}) still to copy here{/if}
+                  {#if c.otherCompletion !== null}· {there} {Math.floor(c.otherCompletion)}% done{/if}
                 </span>
                 {#if c.localChanges}
-                  <span class="small warn">{c.localChanges} files changed here are not sent back ({me.name} only receives)</span>
+                  <span class="small warn">{c.localChanges} files edited here are not copied back, because this folder only receives from {there}.</span>
                 {/if}
                 {#each c.errors.slice(0, 5) as e, i (i)}<span class="small bad-text mono">{e}</span>{/each}
-                {#each c.samples.slice(0, 5) as p (p)}<span class="small muted mono">waiting: {p}</span>{/each}
+                {#each c.samples.slice(0, 5) as p (p)}<span class="small muted mono">still to copy: {p}</span>{/each}
               </div>
             </li>
           {/each}
@@ -222,11 +223,11 @@
 
   <footer>
     {#if tab === 'check'}
-      <button class="btn" disabled={loading} onclick={() => load('check', true)} title="Ask Syncthing to look at every folder again first">
-        {loading ? 'Checking…' : 'Scan again and check'}
+      <button class="btn" disabled={loading} onclick={() => load('check', true)} title="Look through every folder for changes first, then check">
+        {loading ? 'Checking…' : 'Look again and check'}
       </button>
     {:else}
-      <button class="btn" disabled={loading} onclick={() => load(tab)}>{loading ? 'Looking…' : 'Look again'}</button>
+      <button class="btn" disabled={loading} onclick={() => load(tab)}>{loading ? 'Looking…' : 'Refresh'}</button>
     {/if}
     <button class="btn primary" onclick={onclose}>Done</button>
   </footer>

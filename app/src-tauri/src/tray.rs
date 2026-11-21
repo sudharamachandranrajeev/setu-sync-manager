@@ -29,7 +29,7 @@ pub fn status_line() -> String {
     if !w.gate.open {
         return format!("Setu: on hold ({})", w.gate.reason.as_deref().unwrap_or("network"));
     }
-    "Setu: syncing".into()
+    "Setu: running".into()
 }
 
 fn show_main(app: &AppHandle) {
@@ -55,7 +55,7 @@ pub fn setup(app: &App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Setu", true, None::<&str>)?;
     let conflicts = MenuItem::with_id(app, "conflicts", "Conflicts…", true, None::<&str>)?;
     let versions = MenuItem::with_id(app, "versions", "Old versions…", true, None::<&str>)?;
-    let check = MenuItem::with_id(app, "check", "Check folders…", true, None::<&str>)?;
+    let check = MenuItem::with_id(app, "check", "Progress…", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Setu", true, None::<&str>)?;
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)

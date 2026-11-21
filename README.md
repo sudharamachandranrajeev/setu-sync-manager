@@ -34,19 +34,25 @@ does that, and Setu tells Syncthing what to do. It works with two computers at a
 
 ## ✨ What it does
 
-- 🧭 **A direction for every folder and file** – Off, Send, Receive or Both ways, set with one
-  click. Everything inside a folder follows it unless you choose otherwise.
+- 🧭 **A direction for every folder and file** – *Copy from Windows*, *Copy to Windows*, *Both
+  ways* or *Don't sync*, set with one click. Everything inside a folder follows it unless you
+  choose otherwise. (Setu names the other computer by its system, so on Windows it says *Linux*.)
+- ⚡ **Quick setup in two steps** – pick "copy everything from the other computer", "copy
+  everything to it" or "keep both the same", then untick the folders to leave out. Folders are
+  listed biggest first, with sizes, so large projects are easy to spot.
 - 👀 **Both computers in one view** – see what is here, what is there and what is only on one
   side, with sizes, before you decide.
 - 📝 **See before you change** – your choices stay a draft until you open the review, read the
-  plan and press Apply.
+  plan and press **Start syncing**.
 - 🔒 **Secrets never travel** – API key folders, `.env` files and signing keys are always left
   out, whatever you choose. Build and cache folders are left out too.
-- 🔢 **Numbered rule changes** – every change to the rules gets a revision number, and each
-  computer shows which revision it has applied, so you can tell they agree.
+- 🤝 **Both computers agree** – the top bar says whether both computers have saved the same
+  settings, or which one still has to press **Start syncing**.
+- 📊 **Progress in plain words** – the bottom bar shows what is still copying ("Copying to this
+  computer: 1,204 files (3.1 GB) left") and says when everything is copied.
 - ↩️ **Nothing lost by changing your mind** – switching a folder off stops syncing it; the files
   stay on both computers.
-- 🧱 **Starts with everything Off** – nothing moves until you choose it.
+- 🧱 **Starts with nothing synced** – nothing moves until you choose it.
 - 🔍 **File-by-file preview** – before the first sync, Setu compares both computers' file lists
   and shows how many files go each way, which ones get replaced, and which stay on one side.
   If many files would be replaced, it asks a second time.
@@ -59,7 +65,8 @@ does that, and Setu tells Syncthing what to do. It works with two computers at a
 - ⚖️ **Conflicts, side by side** – when a file changed on both computers, both copies are kept;
   pick the one you want, and the other is put away, not deleted.
 - 🕰️ **Old versions for 30 days** – put back any replaced or deleted file from a list.
-- ✅ **Check** – one click confirms every synced folder is complete and error-free.
+- ✅ **Is it all copied?** – one click shows, folder by folder, that every file is complete and
+  identical on both computers, or what is still missing and why.
 - 🔔 **Notifications and tray** – a desktop notice when a folder is paused, a conflict appears or
   files cannot sync.
 
@@ -83,22 +90,22 @@ computers paired in Syncthing (each one added as a device on the other).
    Any empty folder path works.
 3. **Open Setu on the first computer.** It asks for the folder to manage (for example
    `/home/you/Work`). Pick it and press **Continue**.
-4. **Create the rules, once.** Choose what the other computer runs and press **Create rules**.
-   Everything starts Off.
-5. **Open Setu on the second computer** and pick its folder (for example `C:\Work`). It picks
-   up the same rules through Syncthing.
-6. **Choose directions.** Click a folder or file, then pick **Off**, **Send**, **Both ways** or
-   **Receive** on the right.
-7. **Review and apply.** Press **Review and apply**, read the list and press **Apply**. Then
-   open Setu on the other computer and apply there too. A folder starts syncing once both
-   computers have applied it.
+4. **Create the settings, once.** Choose what the other computer runs and press **Create
+   settings**. Everything starts as *Don't sync*.
+5. **Open Setu on the second computer** and pick its folder (for example `C:\Work`). It gets
+   the same settings through Syncthing.
+6. **Choose what to copy.** Press **Quick setup** for the two-step version, or click any folder
+   or file and choose on the right.
+7. **Review and start.** Press **Review**, read what will happen and press **Start syncing**.
+   Then open Setu on the other computer, press **Review** and **Start syncing** there too.
+   Copying starts once both computers have said yes. The bottom bar shows the progress.
 
 ## 🧩 How it works
 
 ```mermaid
 flowchart LR
   A[Your choices in Setu] --> B[Draft]
-  B -->|Review and Apply| C[Shared rules, revision N]
+  B -->|Review, Start syncing| C[Shared settings, revision N]
   C -->|setu-control folder| D[Other computer's Setu]
   C --> E[Syncthing folders and ignore lists on this computer]
   D --> F[Syncthing folders and ignore lists there]
@@ -108,8 +115,8 @@ flowchart LR
 - Each folder whose direction differs from the folder around it becomes its own Syncthing
   folder: *send only* on the sending computer, *receive only* on the other, or *send and
   receive* for Both ways.
-- Files and folders switched off are added to that Syncthing folder's ignore list. A file can
-  have its own direction only when the folder it sits in is Off.
+- Files and folders set to *Don't sync* are added to that Syncthing folder's ignore list. A file
+  can have its own direction only when the folder it sits in is *Don't sync*.
 - Setu only touches Syncthing folders whose ID starts with `setu-f-`. If another Syncthing folder
   overlaps a folder Setu manages, Setu stops and tells you instead of guessing.
 
@@ -120,6 +127,26 @@ flowchart LR
 
 No. Files go directly between your two computers through Syncthing. Setu has no server and no
 account.
+</details>
+
+<details>
+<summary><b>How do I copy everything from Windows to Linux, but leave out some big projects?</b></summary>
+
+On the Linux computer:
+
+1. Press **Quick setup** and choose **Copy everything from Windows to this computer**.
+2. Press **Next**. Untick the projects to leave out. The biggest folders are at the top, and
+   anything over 1 GB is marked *large*.
+3. Press **Review**, check the numbers and press **Start syncing**.
+4. On Windows, open Setu, press **Review** and **Start syncing**.
+
+To leave out something deeper, such as one project inside a folder, click it in the list and
+choose **Don't sync**. Build output (`node_modules`, `target`, `build`, `dist`, `.git`) is
+always left out, so code projects are usually much smaller than they look on disk.
+
+What this means day to day: edits and deletes on Windows reach Linux. Edits you make on Linux
+stay on Linux and are not sent back. Files that exist only on Linux are kept. A project you
+left out is not touched on either computer.
 </details>
 
 <details>
@@ -134,7 +161,7 @@ Syncthing.
 <summary><b>Where do replaced and deleted files go?</b></summary>
 
 Into a hidden `.stversions` folder inside each synced folder, kept for 30 days. Open
-**Versions** in Setu to put one back. A conflict copy you do not keep goes there too.
+**Old versions** in Setu and press **Put back**. A conflict copy you do not keep goes there too.
 </details>
 
 <details>

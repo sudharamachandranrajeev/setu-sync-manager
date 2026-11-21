@@ -295,9 +295,9 @@ pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, clie
                 match apply_gate(&mut state, gate, client) {
                     Ok(()) if was_open && !state.gate.open => notify(&notice(
                         "Setu: syncing on hold",
-                        format!("{}. It resumes on its own when the network is fine.", state.gate.reason.as_deref().unwrap_or("network")),
+                        format!("{}. Copying starts again by itself when the connection is suitable.", state.gate.reason.as_deref().unwrap_or("network")),
                     )),
-                    Ok(()) if !was_open && state.gate.open => notify(&notice("Setu: syncing again", "The network is fine again.".into())),
+                    Ok(()) if !was_open && state.gate.open => notify(&notice("Setu: syncing again", "The connection is suitable again.".into())),
                     Ok(()) => {}
                     Err(e) => eprintln!("setu watch: gate: {e}"),
                 }
@@ -324,7 +324,7 @@ pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, clie
                         counter.reset(&folder);
                         notify(&notice(
                             "Setu paused a folder",
-                            format!("{n} files were deleted on the other computer within two minutes. Open Setu to check, then resume. Deleted files are kept for 30 days."),
+                            format!("{n} files were deleted on the other computer within two minutes. That folder is paused here until you check it in Setu. Deleted files can be got back for 30 days."),
                         ));
                     }
                     conflicts.extend(conflict_names(ev));
@@ -336,7 +336,7 @@ pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, clie
                         if n > 0 && now_secs() >= last + ERROR_NOTICE_EVERY {
                             error_told.insert(folder.to_string(), now_secs());
                             let first = ev["data"]["errors"][0]["path"].as_str().unwrap_or("?");
-                            notify(&notice("Setu: files could not sync", format!("{n} file(s), for example {first}. Open Setu → Check for the reasons.")));
+                            notify(&notice("Setu: files could not sync", format!("{n} file(s), for example {first}. Open Setu → Progress to see why.")));
                         }
                     }
                 }

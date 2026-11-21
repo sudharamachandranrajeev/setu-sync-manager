@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { listen } from '@tauri-apps/api/event'
-  import { api, type NodeView, type Os, type PlanView, type Report, type View } from './lib/api'
+  import { api, type FolderCheck, type NodeView, type Os, type PlanView, type Report, type View } from './lib/api'
   import DirPicker from './lib/DirPicker.svelte'
   import FirstSync from './lib/FirstSync.svelte'
   import PlanSheet from './lib/PlanSheet.svelte'
   import TrustSheet, { type TrustTab } from './lib/TrustSheet.svelte'
   import Tree, { type Row } from './lib/Tree.svelte'
-  import { ago, bytes, dirOf, modeOf, sentence, shortLabel, type Dir } from './lib/format'
+  import { ago, bytes, called, dirOf, modeOf, sentence, shortLabel, type Dir } from './lib/format'
 
   let view = $state<View | null>(null)
   let rows = $state<Row[]>([])
@@ -20,9 +20,12 @@
   let otherOs = $state<Os>('windows')
   let guide = $state(false)
   let trust = $state<TrustTab | null>(null)
+  let checks = $state<FolderCheck[] | null>(null)
 
   const me = $derived(view?.me ?? null)
   const other = $derived(view?.other ?? null)
+  /** The other computer in everyday words ("Windows"). */
+  const there = $derived(me && other ? called(other, me) : 'the other computer')
   const sel = $derived(rows.find((r) => r.node.path === selected)?.node ?? null)
 
   function fail(e: unknown) {
@@ -60,8 +63,20 @@
     if (v.stage === 'ready') await reloadOpen()
   }
 
+  /** Copy progress, read from Syncthing every few seconds. */
+  async function poll() {
+    if (view?.stage !== 'ready' || document.hidden) return
+    try {
+      checks = await api.verify(false)
+    } catch {
+      checks = null
+    }
+  }
+
   onMount(() => {
     api.state().then(boot).catch(fail)
+    const timer = setInterval(poll, 8000)
+    setTimeout(poll, 1500)
     // The tray menu opens a sheet directly.
     const off = listen<TrustTab>('open-trust', (e) => {
       plan = null
@@ -69,6 +84,7 @@
       trust = e.payload
     })
     return () => {
+      clearInterval(timer)
       off.then((f) => f())
     }
   })
@@ -153,7 +169,12 @@
       const r: Report = await api.apply(guardConfirmed)
       plan = null
       await boot(await api.refresh())
-      say(`Applied. ${r.added} added, ${r.updated} changed, ${r.removed} removed.`)
+      say(
+        r.added + r.updated + r.removed
+          ? `Saved. Now open Setu on ${there} and press Start syncing there too.`
+          : 'Saved. Nothing needed changing on this computer.',
+      )
+      poll()
     } catch (e) {
       fail(e)
     } finally {
@@ -164,7 +185,7 @@
   async function discard() {
     try {
       await boot(await api.discard())
-      say('Changes discarded.')
+      say('Changes undone.')
     } catch (e) {
       fail(e)
     }
@@ -194,6 +215,11 @@
     }
   }
 
+  /** Quick setup: choose for the whole folder. */
+  async function pickRoot(d: Dir) {
+    await pick('', true, d)
+  }
+
   async function changed(message: string) {
     say(message)
     try {
@@ -219,6 +245,26 @@
     const side = (r: number | null) => (r === want ? 'ok' : r === null ? 'none' : 'behind')
     return { want, me: side(me?.appliedRevision ?? null), other: side(other?.appliedRevision ?? null) }
   })
+
+  /** One plain line about copying, for the bottom bar. */
+  const progress = $derived.by((): { text: string; tone: 'ok' | 'busy' | 'wait' | 'bad' } | null => {
+    if (!checks || !other) return null
+    if (checks.length === 0) return { text: 'Nothing syncs yet. Press Quick setup to choose what to copy.', tone: 'wait' }
+    if (checks.some((c) => c.errors.length)) return { text: 'Some files could not be copied. Press to see which.', tone: 'bad' }
+    if (revState && revState.me !== 'ok') return null
+    if (revState && revState.other !== 'ok') return { text: `Waiting for ${there}: open Setu there and press Start syncing.`, tone: 'wait' }
+    if (!other.connected) return { text: `${there} is offline. Copying continues when both computers are on and connected.`, tone: 'wait' }
+    const needFiles = checks.reduce((s, c) => s + c.needFiles, 0)
+    const needBytes = checks.reduce((s, c) => s + c.needBytes, 0)
+    if (needFiles) return { text: `Copying to this computer: ${needFiles.toLocaleString()} files (${bytes(needBytes)}) left.`, tone: 'busy' }
+    const behind = checks.filter((c) => c.otherCompletion !== null && c.otherCompletion < 100)
+    if (behind.length) {
+      const pct = Math.floor(Math.min(...behind.map((c) => c.otherCompletion ?? 100)))
+      return { text: `Copying to ${there}: ${pct}% done.`, tone: 'busy' }
+    }
+    if (checks.some((c) => c.state !== 'idle')) return { text: 'Looking for changes…', tone: 'busy' }
+    return { text: `✓ All copied. Both computers have the same files in ${checks.length === 1 ? 'the synced folder' : `all ${checks.length} synced folders`}.`, tone: 'ok' }
+  })
 </script>
 
 <svelte:window onkeydown={onkey} />
@@ -231,30 +277,32 @@
     </div>
     {#if view?.stage === 'ready' && me && other}
       <div class="link">
-        <span class="dev">{me.name}<small>this computer</small></span>
+        <span class="dev" title={me.name}>This computer<small>{me.name}</small></span>
         <span class="wire" class:up={other.connected} title={other.connected ? `Connected${other.address ? ' via ' + other.address : ''}` : 'Not connected'}>
           <span class="dot"></span>
         </span>
-        <span class="dev">{other.name}<small>{other.connected ? 'connected' : 'not connected'}</small></span>
+        <span class="dev" title={other.name}>{there}<small>{other.connected ? 'connected' : 'offline'}</small></span>
       </div>
       {#if revState}
-        <div class="revs" title="Every change to the rules is a numbered revision. Both computers should show the same number.">
-          <span>Rules r{revState.want}</span>
-          <span class="rev {revState.me}">here {me.appliedRevision ? 'r' + me.appliedRevision : '—'}</span>
-          <span class="rev {revState.other}">{other.name} {other.appliedRevision ? 'r' + other.appliedRevision : '—'}</span>
-        </div>
+        {@const both = revState.me === 'ok' && revState.other === 'ok'}
+        <span
+          class="rev {both ? 'ok' : 'behind'}"
+          title="Settings version {revState.want}. This computer has {me.appliedRevision ?? 'none'}, {there} has {other.appliedRevision ?? 'none'}."
+        >
+          {both ? 'Both computers agree' : revState.me !== 'ok' ? 'New settings to save here' : `Waiting for ${there} to save`}
+        </span>
       {/if}
     {/if}
     <div class="grow"></div>
     {#if view?.stage === 'ready'}
       {#if view.fileConflicts}
-        <button class="btn conflicts" onclick={() => (trust = 'conflicts')} title="Files changed on both computers">
+        <button class="btn conflicts" onclick={() => (trust = 'conflicts')} title="Files edited on both computers: pick which version to keep">
           {view.fileConflicts} conflict{view.fileConflicts === 1 ? '' : 's'}
         </button>
       {/if}
-      <button class="btn" onclick={() => (trust = 'versions')} title="Old versions: put back a replaced or deleted file">Versions</button>
-      <button class="btn" onclick={() => (trust = 'check')} title="Check every synced folder is complete">Check</button>
-      <button class="btn" onclick={() => (guide = true)} title="First-sync guide: go through the top folders one at a time">Guide</button>
+      <button class="btn" onclick={() => (trust = 'versions')} title="Get back a file that was changed or deleted in the last 30 days">Old versions</button>
+      <button class="btn" onclick={() => (trust = 'check')} title="See whether every synced folder is fully copied">Progress</button>
+      <button class="btn" onclick={() => (guide = true)} title="Choose what to copy in two steps">Quick setup</button>
       <button class="btn" onclick={refresh} title="Read the folders again (F5)">Refresh</button>
     {/if}
   </header>
@@ -267,31 +315,31 @@
   {/if}
   {#if view?.conflicts.length}
     <div class="banner warn">
-      The rules file was changed on both computers at once. Setu kept one; the other is saved as
-      {view.conflicts.join(', ')}. Check your choices, then apply again.
+      Sync settings were changed on both computers at the same time. Setu kept one set; the other is saved as
+      {view.conflicts.join(', ')}. Check your choices below, then press Review again.
     </div>
   {/if}
 
   {#each view?.watch?.holds ?? [] as h (h.folder)}
     <div class="banner bad" role="alert">
       <span>
-        <b>{h.rel === null ? h.folder : h.rel || 'The whole folder'}</b> is paused here: {h.deletes} files were deleted on
-        {other?.name ?? 'the other computer'} within two minutes. Check that this was meant. Deleted files are kept for 30 days in
-        the folder's <span class="mono">.stversions</span>.
+        <b>Paused for safety: {h.rel === null ? h.folder : h.rel || 'everything'}.</b> {h.deletes} files were deleted on
+        {there} within two minutes, so Setu paused this folder here before the deletes reached it. If that was meant, press Resume. If not, nothing
+        is lost yet: fix it on {there} first, and any file already removed can be got back under Old versions for 30 days.
       </span>
       <button class="btn" onclick={() => resume(h.folder)}>Resume syncing</button>
     </div>
   {/each}
   {#if view?.stage === 'ready' && view.watch && view.watch.running && !view.watch.gateOpen}
     <div class="banner warn">
-      <span>Syncing is on hold here: {view.watch.reason}. Setu's folders resume when the network is fine again.</span>
-      {#if view.watch.metered && !view.watch.allowMetered}<button class="btn" onclick={() => allow('metered', true)}>Allow on metered network</button>{/if}
-      {#if view.watch.relayed && !view.watch.allowRelay}<button class="btn" onclick={() => allow('relay', true)}>Allow through relay</button>{/if}
+      <span>Copying is on hold: {view.watch.reason}. It starts again by itself when the connection is suitable.</span>
+      {#if view.watch.metered && !view.watch.allowMetered}<button class="btn" onclick={() => allow('metered', true)}>Copy anyway on this network</button>{/if}
+      {#if view.watch.relayed && !view.watch.allowRelay}<button class="btn" onclick={() => allow('relay', true)}>Copy anyway through the relay</button>{/if}
     </div>
   {/if}
   {#if view?.stage === 'ready' && view.watch && !view.watch.running}
     <div class="banner warn">
-      <span>Setu's background helper is not running, so the network gate and the delete guard are off. It starts at logon once installed (<span class="mono">setu-watch</span>).</span>
+      <span>Setu's background helper isn't running. Files still copy, but two safety checks are off: pausing when many files are deleted at once, and waiting for a suitable network. It normally starts when you sign in (<span class="mono">setu-watch</span>).</span>
     </div>
   {/if}
 
@@ -300,8 +348,8 @@
   {:else if view.stage === 'setup'}
     <div class="center">
       <div class="card">
-        <h1>Choose the folder to share</h1>
-        <p class="muted">Pick the folder on this computer that Setu manages. Nothing syncs until you choose what goes where and press Apply.</p>
+        <h1>Which folder should Setu look after?</h1>
+        <p class="muted">Type the folder on this computer that holds the files you want to sync. Nothing is copied until you choose what goes where and press Start syncing.</p>
         <input type="text" placeholder="/home/you/Work or C:\Work" bind:value={rootInput} onkeydown={(e) => e.key === 'Enter' && init()} />
         <div class="row-end"><button class="btn primary" disabled={!rootInput.trim()} onclick={init}>Continue</button></div>
       </div>
@@ -309,8 +357,8 @@
   {:else if view.stage === 'rules'}
     <div class="center">
       <div class="card">
-        <h1>Start the rules</h1>
-        <p class="muted">No rules yet. Do this on one computer only; the other picks them up through Syncthing. Everything starts Off.</p>
+        <h1>Set up sync settings</h1>
+        <p class="muted">Do this on one computer only; the other one gets the settings automatically. Everything starts as Don't sync, so nothing is copied yet.</p>
         <p class="muted mono">{view.root}</p>
         <label class="field">
           The other computer runs
@@ -320,7 +368,7 @@
             <option value="macos">macOS</option>
           </select>
         </label>
-        <div class="row-end"><button class="btn primary" onclick={createRules}>Create rules</button></div>
+        <div class="row-end"><button class="btn primary" onclick={createRules}>Create settings</button></div>
       </div>
     </div>
   {:else if me && other}
@@ -328,13 +376,13 @@
       <section class="treepane">
         <button class="rootrow" class:sel={selected === null} onclick={() => (selected = null)}>
           <span class="mono path">{view.root}</span>
-          <span class="muted small">{view.localEntries.toLocaleString()} items here{view.remoteEntries !== null ? ` · ${view.remoteEntries.toLocaleString()} on ${other.name}` : ''}</span>
-          <span class="chip {dirOf(view.rootMode, me.id)}">{shortLabel(dirOf(view.rootMode, me.id))}</span>
+          <span class="muted small">{view.localEntries.toLocaleString()} items here{view.remoteEntries !== null ? ` · ${view.remoteEntries.toLocaleString()} on ${there}` : ''}</span>
+          <span class="chip {dirOf(view.rootMode, me.id)}">{shortLabel(dirOf(view.rootMode, me.id), there)}</span>
         </button>
         {#if view.remoteEntries === null}
-          <p class="hint">{other.name}'s file list has not arrived yet. Open Setu there once; until then only this computer's files show.</p>
+          <p class="hint">{there}'s file list hasn't arrived yet, so only this computer's files show. Open Setu on {there} once to send it.</p>
         {/if}
-        <Tree {rows} {selected} meId={me.id} thereName={other.name} remoteKnown={view.remoteEntries !== null} onselect={(n) => (selected = n.path)} ontoggle={toggle} />
+        <Tree {rows} {selected} meId={me.id} {there} remoteKnown={view.remoteEntries !== null} onselect={(n) => (selected = n.path)} ontoggle={toggle} />
       </section>
 
       <aside class="details">
@@ -342,44 +390,44 @@
           {@const d = dirOf(sel.effective, me.id)}
           <h2 class="title" title={sel.path}>{sel.name}</h2>
           <p class="mono muted crumb">{sel.path}</p>
-          <DirPicker value={d} allowed={allowed(sel)} meName={me.name} otherName={other.name} onpick={(x) => pick(sel.path, sel.dir, x)} />
-          <p class="say">{sentence(d, me.name, other.name)}</p>
+          <DirPicker value={d} allowed={allowed(sel)} {there} onpick={(x) => pick(sel.path, sel.dir, x)} />
+          <p class="say">{sentence(d, there)}</p>
           <p class="muted small">
             {#if sel.explicit !== null}
-              Set on this {sel.dir ? 'folder' : 'file'}.
-              <button class="link-btn" onclick={() => pick(sel.path, sel.dir, null)}>Use the folder's choice</button>
+              Chosen for this {sel.dir ? 'folder and everything in it' : 'file'}.
+              <button class="link-btn" onclick={() => pick(sel.path, sel.dir, null)}>Follow the folder above instead</button>
             {:else}
-              Inherited from {sel.from ? sel.from : 'the whole folder'}.
+              Follows {sel.from ? sel.from : 'the top-level choice'}.{sel.dir ? ' Choose here to treat this folder differently.' : ''}
             {/if}
           </p>
           {#if !sel.dir && parentDir(sel) !== 'off'}
-            <p class="muted small">To give this file its own direction, turn its folder Off first.</p>
+            <p class="muted small">A single file can only be left out here. To send it a different way from its folder, set the folder to Don't sync first.</p>
           {/if}
           <dl class="facts">
-            <dt>{me.name}</dt>
+            <dt>This computer</dt>
             <dd>{sel.here ? `${bytes(sel.here.size)}${sel.dir ? ` · ${sel.here.files.toLocaleString()} files` : ''}` : 'not here'}</dd>
-            <dt>{other.name}</dt>
-            <dd>{sel.there ? `${bytes(sel.there.size)}${sel.dir ? ` · ${sel.there.files.toLocaleString()} files` : ''}` : view.remoteEntries === null ? 'list not arrived' : 'not there'}</dd>
+            <dt>{there}</dt>
+            <dd>{sel.there ? `${bytes(sel.there.size)}${sel.dir ? ` · ${sel.there.files.toLocaleString()} files` : ''}` : view.remoteEntries === null ? 'list not arrived yet' : 'not there'}</dd>
           </dl>
         {:else}
           {@const d = dirOf(view.rootMode, me.id)}
-          <h2 class="title">Whole folder</h2>
+          <h2 class="title">Everything</h2>
           <p class="mono muted crumb">{view.root}</p>
-          <DirPicker value={d} meName={me.name} otherName={other.name} onpick={(x) => pick('', true, x)} />
-          <p class="say">{sentence(d, me.name, other.name)}</p>
-          <p class="muted small">Everything inside follows this unless you choose otherwise for a folder or file.</p>
+          <DirPicker value={d} {there} onpick={(x) => pick('', true, x)} />
+          <p class="say">{sentence(d, there)}</p>
+          <p class="muted small">Every folder and file follows this, except the ones you choose differently in the list. To leave a big project out, click it in the list and choose Don't sync.</p>
           <div class="never">
-            <h3>Never synced</h3>
-            <p class="muted small">Secrets and build output stay on each computer, whatever you choose.</p>
+            <h3>Always left out</h3>
+            <p class="muted small">Secrets and files that can be rebuilt stay on each computer, whatever you choose.</p>
             <p class="mono small">API keys · .env · keystores · {view.alwaysIgnore.map((x) => x.replace('(?d)', '')).join(' · ')}</p>
           </div>
-          <p class="muted small">{other.name}'s file list: {ago(view.remoteListAge)}</p>
+          <p class="muted small">{there}'s file list last updated: {ago(view.remoteListAge)}</p>
           {#if view.watch}
             <div class="never">
               <h3>Network</h3>
-              <label class="tog"><input type="checkbox" checked={view.watch.allowMetered} onchange={(e) => allow('metered', (e.currentTarget as HTMLInputElement).checked)} /> Sync on metered networks</label>
-              <label class="tog"><input type="checkbox" checked={view.watch.allowRelay} onchange={(e) => allow('relay', (e.currentTarget as HTMLInputElement).checked)} /> Sync through a relay (slower, uses more data)</label>
-              <p class="muted small">Now: {view.watch.running ? `${view.watch.metered ? 'metered' : 'not metered'}, ${view.watch.relayed ? 'relayed link' : 'direct link'}` : 'helper not running'}</p>
+              <label class="tog"><input type="checkbox" checked={view.watch.allowMetered} onchange={(e) => allow('metered', (e.currentTarget as HTMLInputElement).checked)} /> Copy on limited-data connections (phone hotspot)</label>
+              <label class="tog"><input type="checkbox" checked={view.watch.allowRelay} onchange={(e) => allow('relay', (e.currentTarget as HTMLInputElement).checked)} /> Copy through an internet relay when a direct link fails (slower)</label>
+              <p class="muted small">Now: {view.watch.running ? `${view.watch.metered ? 'limited-data connection' : 'normal connection'}, ${view.watch.relayed ? 'through a relay' : 'direct link'}` : 'helper not running'}</p>
             </div>
           {/if}
         {/if}
@@ -388,16 +436,21 @@
 
     <footer class="bar" class:live={view.edits.length > 0}>
       {#if view.edits.length}
-        <span><b>{view.edits.length}</b> change{view.edits.length === 1 ? '' : 's'} not applied yet</span>
+        <span><b>{view.edits.length}</b> change{view.edits.length === 1 ? '' : 's'} not saved yet</span>
         <div class="grow"></div>
-        <button class="btn" onclick={discard}>Discard</button>
-        <button class="btn primary" onclick={review}>Review and apply</button>
+        <button class="btn" onclick={discard}>Undo changes</button>
+        <button class="btn primary" onclick={review}>Review</button>
+      {:else if revState && revState.me !== 'ok'}
+        <span>{there} changed the sync settings. Review them and press Start syncing to use them here too.</span>
+        <div class="grow"></div>
+        <button class="btn primary" onclick={review}>Review</button>
+      {:else if progress}
+        <button class="status {progress.tone}" onclick={() => (trust = 'check')} title="Show each folder">
+          {#if progress.tone === 'busy'}<span class="spin" aria-hidden="true"></span>{/if}
+          {progress.text}
+        </button>
       {:else}
-        <span class="muted">
-          {revState?.me === 'ok' ? 'This computer matches the rules.' : 'This computer has not applied the latest rules.'}
-        </span>
-        <div class="grow"></div>
-        {#if revState?.me !== 'ok'}<button class="btn primary" onclick={review}>Review and apply</button>{/if}
+        <span class="muted">Checking progress…</span>
       {/if}
     </footer>
   {/if}
@@ -407,18 +460,20 @@
     <FirstSync
       folders={rows.filter((r) => r.depth === 0 && r.node.dir).map((r) => r.node)}
       {me}
-      {other}
+      {there}
       remoteKnown={view.remoteEntries !== null}
+      rootDir={dirOf(view.rootMode, me.id)}
+      onroot={pickRoot}
       onpick={(n, d) => pick(n.path, true, d)}
       onclose={() => (guide = false)}
       onreview={review}
     />
   {/if}
   {#if plan && me && other}
-    <PlanSheet view={plan} {me} {other} {busy} onclose={() => (plan = null)} onapply={apply} />
+    <PlanSheet view={plan} {me} {there} {busy} onclose={() => (plan = null)} onapply={apply} />
   {/if}
   {#if trust && me && other}
-    <TrustSheet bind:tab={trust} {me} {other} onclose={() => (trust = null)} onchanged={changed} />
+    <TrustSheet bind:tab={trust} {there} onclose={() => (trust = null)} onchanged={changed} />
   {/if}
 </div>
 
@@ -510,24 +565,18 @@
       left: 19px;
     }
   }
-  .revs {
-    display: flex;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--muted);
-    align-items: center;
-  }
   .rev {
-    padding: 2px 8px;
+    padding: 3px 10px;
     border-radius: 99px;
+    font-size: 12px;
     font-weight: 600;
+    white-space: nowrap;
   }
   .rev.ok {
     color: var(--ok);
     background: color-mix(in srgb, var(--ok) 13%, transparent);
   }
-  .rev.behind,
-  .rev.none {
+  .rev.behind {
     color: var(--warn);
     background: color-mix(in srgb, var(--warn) 15%, transparent);
   }
@@ -602,8 +651,8 @@
   .top .btn {
     white-space: nowrap;
   }
-  @media (max-width: 1000px) {
-    .revs {
+  @media (max-width: 1100px) {
+    .rev {
       display: none;
     }
   }
@@ -620,7 +669,6 @@
     .main {
       grid-template-columns: minmax(0, 1fr) 260px;
     }
-    .revs > span:first-child,
     .rootrow .small {
       display: none;
     }
@@ -759,6 +807,52 @@
   }
   .bar.live {
     background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  }
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 6px 12px;
+    border-radius: 99px;
+    font-weight: 600;
+    font-size: 13px;
+    text-align: left;
+  }
+  .status.ok {
+    color: var(--ok);
+    background: color-mix(in srgb, var(--ok) 12%, transparent);
+  }
+  .status.busy {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .status.wait {
+    color: var(--warn);
+    background: var(--warn-bg);
+  }
+  .status.bad {
+    color: var(--bad);
+    background: var(--bad-bg);
+  }
+  .spin {
+    flex: none;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-top-color: currentColor;
+    animation: spin 800ms linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spin {
+      animation: none;
+    }
   }
   .toast {
     position: fixed;

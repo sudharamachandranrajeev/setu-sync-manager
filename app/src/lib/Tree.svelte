@@ -13,7 +13,7 @@
     rows,
     selected,
     meId,
-    thereName,
+    there,
     remoteKnown,
     onselect,
     ontoggle,
@@ -21,7 +21,8 @@
     rows: Row[]
     selected: string | null
     meId: string
-    thereName: string
+    /** Everyday name of the other computer. */
+    there: string
     remoteKnown: boolean
     onselect: (n: NodeView) => void
     ontoggle: (n: NodeView) => void
@@ -47,9 +48,9 @@
 
 <div class="head">
   <span>Name</span>
-  <span class="num">Here</span>
-  <span class="num" title={thereName}>{thereName}</span>
-  <span class="dirh">Direction</span>
+  <span class="num" title="Size on this computer">This PC</span>
+  <span class="num" title="Size on {there}">{there}</span>
+  <span class="dirh">Sync</span>
 </div>
 <div
   class="scroll"
@@ -96,14 +97,14 @@
             <svg class="ico file" viewBox="0 0 20 20" width="16" height="16"><path d="M5 2.5h6.5L15.5 6.5v11H5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" /><path d="M11.5 2.5v4h4" fill="none" stroke="currentColor" stroke-width="1.4" /></svg>
           {/if}
           <span class="label" title={n.path}>{n.name}</span>
-          {#if !n.here}<span class="only">only on {thereName}</span>{/if}
+          {#if !n.here}<span class="only">only on {there}</span>{/if}
           {#if remoteKnown && !n.there && n.here}<span class="only">only here</span>{/if}
         </span>
         <span class="num" class:none={!n.here}>{n.here ? bytes(n.here.size) : '—'}</span>
         <span class="num" class:none={!n.there}>{n.there ? bytes(n.there.size) : '—'}</span>
         <span class="dir">
-          <span class="chip {d}" class:set={n.explicit !== null} title={n.explicit ? 'Set here' : 'Inherited'}>
-            <span class="g">{glyph[d]}</span>{shortLabel(d)}
+          <span class="chip {d}" class:set={n.explicit !== null} title={n.explicit ? 'Chosen for this item' : 'Follows the folder it is in'}>
+            <span class="g">{glyph[d]}</span>{shortLabel(d, there)}
           </span>
         </span>
       </div>
@@ -115,14 +116,14 @@
   .head,
   .row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 84px 84px 120px;
+    grid-template-columns: minmax(0, 1fr) 84px 84px 136px;
     column-gap: 6px;
     align-items: center;
   }
   @media (max-width: 900px) {
     .head,
     .row {
-      grid-template-columns: minmax(0, 1fr) 64px 64px 104px;
+      grid-template-columns: minmax(0, 1fr) 70px 70px 124px;
     }
   }
   .head {
@@ -236,6 +237,9 @@
     height: 24px;
     padding: 0 9px;
     border-radius: 99px;
+    max-width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
     font-size: 12px;
     font-weight: 600;
     border: 1px dashed currentColor;

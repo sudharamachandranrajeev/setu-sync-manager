@@ -22,22 +22,38 @@ export function modeOf(dir: Dir, me: DeviceView, other: DeviceView): string {
   }
 }
 
-export const glyph: Record<Dir, string> = { off: '–', both: '⇄', out: '→', in: '←' }
-
-export function shortLabel(d: Dir): string {
-  return { off: 'Off', both: 'Both ways', out: 'Send', in: 'Receive' }[d]
+/**
+ * What to call the other computer in everyday words: "Windows", "Linux" or "Mac" when the two
+ * computers run different systems, otherwise its device name.
+ */
+export function called(other: DeviceView, me: DeviceView): string {
+  if (other.os === me.os) return other.name
+  return { windows: 'Windows', linux: 'Linux', macos: 'Mac' }[other.os]
 }
 
-export function sentence(d: Dir, me: string, other: string): string {
+export const glyph: Record<Dir, string> = { off: '–', both: '⇄', out: '→', in: '←' }
+
+/** Short label for chips in the list. */
+export function shortLabel(d: Dir, there: string): string {
+  return { off: 'Not synced', both: 'Both ways', out: `To ${there}`, in: `From ${there}` }[d]
+}
+
+/** Label for the choice buttons. */
+export function choiceLabel(d: Dir, there: string): string {
+  return { off: "Don't sync", both: 'Both ways', out: `Copy to ${there}`, in: `Copy from ${there}` }[d]
+}
+
+/** What a choice does, in full. */
+export function sentence(d: Dir, there: string): string {
   switch (d) {
     case 'off':
-      return `Not synced. ${me} and ${other} each keep their own copy.`
+      return `Not synced. Each computer keeps its own copy, and nothing is copied either way.`
     case 'both':
-      return `Changes made on either computer reach the other.`
+      return `Both computers keep the same files. A change or delete on either one is copied to the other.`
     case 'out':
-      return `${me} sends and ${other} receives. Changes made on ${other} are not sent back.`
+      return `This computer's files are copied to ${there}. Edits and deletes made here reach ${there}. Edits made on ${there} stay there and are not copied back.`
     case 'in':
-      return `${other} sends and ${me} receives. Changes made here are not sent back.`
+      return `${there}'s files are copied to this computer. Edits and deletes made on ${there} reach here. Edits you make here stay here and are not copied back.`
   }
 }
 
@@ -59,4 +75,22 @@ export function ago(secs: number | null): string {
   if (secs < 3600) return `${Math.round(secs / 60)} min ago`
   if (secs < 86400 * 2) return `${Math.round(secs / 3600)} h ago`
   return `${Math.round(secs / 86400)} days ago`
+}
+
+/** Syncthing's folder states in everyday words. */
+export function stateWord(s: string): string {
+  return (
+    {
+      idle: 'up to date',
+      syncing: 'copying',
+      'sync-preparing': 'getting ready to copy',
+      'sync-waiting': 'waiting its turn',
+      scanning: 'looking for changes',
+      'scan-waiting': 'waiting to look for changes',
+      cleaning: 'tidying up',
+      paused: 'paused',
+      missing: 'not set up on this computer yet',
+      error: 'stopped by an error',
+    } as Record<string, string>
+  )[s] ?? s
 }

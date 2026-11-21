@@ -5,14 +5,15 @@
   let {
     view,
     me,
-    other,
+    there,
     busy,
     onclose,
     onapply,
   }: {
     view: PlanView
     me: DeviceView
-    other: DeviceView
+    /** Everyday name of the other computer. */
+    there: string
     busy: boolean
     onclose: () => void
     onapply: (guardConfirmed: boolean) => void
@@ -22,22 +23,23 @@
   const pv = $derived(view.preview)
   let understood = $state(false)
   const guarded = $derived(pv.guard.length > 0)
-  const ruleName = (g: { rel: string }) => g.rel || 'Whole folder'
+  const ruleName = (g: { rel: string }) => g.rel || 'Everything else'
   const modeText = (m: string) => {
     const d = dirOf(m, me.id)
-    return d === 'out' ? `${me.name} → ${other.name}` : d === 'in' ? `${other.name} → ${me.name}` : shortLabel(d)
+    return d === 'out' ? `this computer → ${there}` : d === 'in' ? `${there} → this computer` : d === 'both' ? 'both ways' : shortLabel(d, there)
   }
   const blocked = $derived(plan.problems.length > 0)
   const nothing = $derived(plan.actions.length === 0 && view.edits.length === 0)
   const typeLabel = (t: string) => ({ sendonly: 'sends only', receiveonly: 'receives only', sendreceive: 'both ways' })[t] ?? t
-  const where = (p: string) => p || '(whole folder)'
+  const where = (p: string) => p || 'Everything (top level)'
+  const files = (n: number) => `${n.toLocaleString()} file${n === 1 ? '' : 's'}`
 </script>
 
 <div class="scrim" role="presentation" onclick={onclose}></div>
 <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="plan-title">
   <header>
-    <h2 id="plan-title">Review changes</h2>
-    <p class="muted">Nothing changes until you press Apply. Files are never deleted by applying.</p>
+    <h2 id="plan-title">Check before syncing</h2>
+    <p class="muted">Nothing changes until you press Start syncing. Pressing it does not delete any file.</p>
   </header>
 
   <div class="body">
@@ -52,26 +54,26 @@
 
     {#if view.edits.length}
       <section>
-        <h3>Your choices</h3>
+        <h3>What you changed</h3>
         <ul class="edits">
           {#each view.edits as e (e.path)}
             {@const b = dirOf(e.before, me.id)}
             {@const a = dirOf(e.after, me.id)}
             <li>
               <span class="mono path">{where(e.path)}</span>
-              <span class="chip {b}" class:inherit={e.before === null}>{glyph[b]} {e.before === null ? 'inherited' : shortLabel(b)}</span>
+              <span class="chip {b}" class:inherit={e.before === null}>{glyph[b]} {e.before === null ? 'follows folder' : shortLabel(b, there)}</span>
               <span class="arrow">→</span>
-              <span class="chip {a}" class:inherit={e.after === null}>{glyph[a]} {e.after === null ? 'inherited' : shortLabel(a)}</span>
+              <span class="chip {a}" class:inherit={e.after === null}>{glyph[a]} {e.after === null ? 'follows folder' : shortLabel(a, there)}</span>
             </li>
           {/each}
         </ul>
       </section>
     {/if}
 
-    <section>
-      <h3>Syncthing on {me.name}</h3>
+    <details class="tech">
+      <summary class="small">Technical details: Syncthing folders on this computer</summary>
       {#if plan.actions.length === 0}
-        <p class="muted">No changes here. {plan.unchanged} Setu folder(s) already match.</p>
+        <p class="muted small">No changes. {plan.unchanged} Syncthing folder(s) already match.</p>
       {:else}
         <ul class="acts">
           {#each plan.actions as a (a.kind + a.id)}
@@ -87,34 +89,34 @@
           {/each}
         </ul>
       {/if}
-    </section>
+    </details>
 
     <section>
-      <h3>Files</h3>
+      <h3>What will happen</h3>
       {#if pv.otherUnknown}
-        <p class="muted small">{other.name}'s file list has not arrived, so only files on {me.name} are counted.</p>
+        <p class="muted small">{there}'s file list has not arrived yet, so only this computer's files are counted.</p>
       {/if}
       {#if pv.groups.length === 0}
-        <p class="muted">Nothing syncs under these rules.</p>
+        <p class="muted">Nothing will sync. Every folder is set to Don't sync.</p>
       {/if}
       {#each pv.groups as g (g.rel)}
         <div class="group">
           <div class="ghead"><span class="mono path">{ruleName(g)}</span><span class="muted small">{modeText(g.mode)}</span></div>
           <div class="flows">
-            {#if g.send.files}<span class="flow out">→ {g.send.files.toLocaleString()} to {other.name} · {bytes(g.send.bytes)}</span>{/if}
-            {#if g.receive.files}<span class="flow in">← {g.receive.files.toLocaleString()} from {other.name} · {bytes(g.receive.bytes)}</span>{/if}
-            {#if g.replacedThere.files}<span class="flow rep">{g.replacedThere.files.toLocaleString()} replaced on {other.name}</span>{/if}
-            {#if g.replacedHere.files}<span class="flow rep">{g.replacedHere.files.toLocaleString()} replaced here</span>{/if}
-            {#if g.staysHere.files}<span class="flow">{g.staysHere.files.toLocaleString()} only here, stay</span>{/if}
-            {#if g.staysThere.files}<span class="flow">{g.staysThere.files.toLocaleString()} only on {other.name}, stay</span>{/if}
-            {#if g.same.files}<span class="flow">{g.same.files.toLocaleString()} already the same</span>{/if}
+            {#if g.send.files}<span class="flow out">→ copy {files(g.send.files)} ({bytes(g.send.bytes)}) to {there}</span>{/if}
+            {#if g.receive.files}<span class="flow in">← copy {files(g.receive.files)} ({bytes(g.receive.bytes)}) from {there}</span>{/if}
+            {#if g.replacedThere.files}<span class="flow rep">{files(g.replacedThere.files)} on {there} get this computer's version</span>{/if}
+            {#if g.replacedHere.files}<span class="flow rep">{files(g.replacedHere.files)} here get {there}'s version</span>{/if}
+            {#if g.staysHere.files}<span class="flow">{files(g.staysHere.files)} only on this computer: kept, not copied</span>{/if}
+            {#if g.staysThere.files}<span class="flow">{files(g.staysThere.files)} only on {there}: kept, not copied</span>{/if}
+            {#if g.same.files}<span class="flow">{files(g.same.files)} already the same</span>{/if}
           </div>
           {#if g.samples.length}
             <details>
-              <summary class="small">Show replaced files{g.samples.length >= 200 ? ' (first 200)' : ''}</summary>
+              <summary class="small">Show files that get the other version{g.samples.length >= 200 ? ' (first 200)' : ''}</summary>
               <ul class="samples mono small">
                 {#each g.samples as it (it.path)}
-                  <li>{it.path} <span class="muted">— {typeof it.change === 'object' && it.change.replace.winnerHere ? `${me.name}'s copy wins` : `${other.name}'s copy wins`}</span></li>
+                  <li>{it.path} <span class="muted">— {typeof it.change === 'object' && it.change.replace.winnerHere ? 'this computer\'s version is used' : `${there}'s version is used`}</span></li>
                 {/each}
               </ul>
             </details>
@@ -122,14 +124,14 @@
         </div>
       {/each}
       {#if pv.groups.some((g) => g.replacedHere.files || g.replacedThere.files)}
-        <p class="muted small">A replaced file is never lost: its old copy is kept next to it, named <span class="mono">….sync-conflict-…</span>.</p>
+        <p class="muted small">Nothing is lost: the version that loses is kept next to the file with <span class="mono">sync-conflict</span> in its name. Pick which to keep later under Conflicts.</p>
       {/if}
     </section>
 
     {#if pv.windowsNames.length}
       <section class="box warn">
-        <h3>Windows cannot hold these names</h3>
-        <p class="small">These will not copy to {other.name} until renamed. Everything else still syncs.</p>
+        <h3>Windows can't use these names</h3>
+        <p class="small">These won't copy to {there} until you rename them. Everything else still syncs.</p>
         <ul class="samples mono small">
           {#each pv.windowsNames.slice(0, 50) as n (n.path + n.message)}<li><b>{n.path}</b>: {n.message}</li>{/each}
         </ul>
@@ -151,16 +153,16 @@
       </section>
     {/if}
 
-    <p class="muted small">
-      After you apply, {other.name} applies revision {plan.revision} on its side. A folder starts
-      syncing once both computers have it.
+    <p class="next small">
+      <b>Next step:</b> open Setu on {there} and press <i>Start syncing</i> there too. Copying starts once both computers have
+      said yes.
     </p>
   </div>
 
   <footer>
     <button class="btn" onclick={onclose}>Cancel</button>
     <button class="btn primary" disabled={blocked || busy || nothing || (guarded && !understood)} onclick={() => onapply(understood)}>
-      {busy ? 'Applying…' : `Apply revision ${plan.revision}`}
+      {busy ? 'Saving…' : 'Start syncing'}
     </button>
   </footer>
 </div>
@@ -355,6 +357,15 @@
     align-items: center;
     margin-top: 8px;
     font-weight: 600;
+  }
+  .tech {
+    margin-top: 14px;
+  }
+  .next {
+    margin: 16px 0 8px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    background: var(--surface-2);
   }
   footer {
     display: flex;
