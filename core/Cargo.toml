@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# brahma core's Rust sync client: the Brahma account and its end-to-end encrypted rows.
+brahma-sync = { git = "https://github.com/sudharamachandranrajeev/brahma-life-suite", branch = "feat/rust-sync-client" }
+# Bundled SQLite, so Windows needs no system copy.
+rusqlite = { version = "0.37", features = ["bundled"] }
 flate2 = "1"
 roxmltree = "0.21"
 serde = { version = "1", features = ["derive"] }
@@ -14,6 +18,14 @@ sha2 = "0.10"
 thiserror = "2"
 ureq = { version = "3.5", default-features = false, features = ["json"] }
 walkdir = "2.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring-core = "1"
+zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring-core = "1"
+windows-native-keyring-store = "1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -177,7 +177,7 @@ pub enum Restored {
 }
 
 /// The file in `.stversions` that holds `v`: `stem~YYYYMMDD-HHMMSS.ext` with the same size.
-fn version_file(folder_dir: &Path, v: &Version) -> Result<PathBuf, Error> {
+pub(crate) fn version_file(folder_dir: &Path, v: &Version) -> Result<PathBuf, Error> {
     let (dir, name) = v.path.rsplit_once('/').unwrap_or(("", &v.path));
     let (stem, ext) = match name.rfind('.') {
         Some(i) if i > 0 => (&name[..i], &name[i..]),
@@ -276,7 +276,7 @@ pub fn verify(client: &Client, rules: &RuleSet, me: &str, rescan: bool) -> Resul
     let present: Vec<Value> = client.folders()?;
     let mut out = Vec::new();
     for s in &specs {
-        let mut c = FolderCheck { id: s.id.clone(), rel: s.rel.clone(), folder_type: compile::folder_type(&s.mode, me).into(), ..Default::default() };
+        let mut c = FolderCheck { id: s.id.clone(), rel: s.rel.clone(), folder_type: compile::folder_type(&s.mode, me, rules.receive_only(me)).into(), ..Default::default() };
         let Some(f) = present.iter().find(|f| f["id"] == s.id.as_str()) else {
             c.state = "missing".into();
             c.errors.push("not set up here; apply the rules".into());
@@ -345,8 +345,8 @@ mod tests {
         let root = d.path();
         let mut devs = BTreeMap::new();
         let a = "AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA-AAAAAAA";
-        devs.insert(a.to_string(), Device { name: "a".into(), os: Os::Linux });
-        devs.insert("BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB".into(), Device { name: "b".into(), os: Os::Linux });
+        devs.insert(a.to_string(), Device { name: "a".into(), os: Os::Linux, receive_only: false });
+        devs.insert("BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB-BBBBBBB".into(), Device { name: "b".into(), os: Os::Linux, receive_only: false });
         let mut rs = RuleSet::new(devs);
         rs.set("p", Kind::Dir, Some(Mode::Both)).unwrap();
         std::fs::create_dir_all(root.join("p/s")).unwrap();

@@ -192,8 +192,10 @@ pub fn escape(path: &str, os: Os) -> String {
 }
 
 /// What this device's Syncthing folder type is for a mode.
-pub fn folder_type(mode: &Mode, device: &str) -> &'static str {
+/// The Syncthing folder type for `device`. A backup copy (`receive_only`) only ever receives.
+pub fn folder_type(mode: &Mode, device: &str, receive_only: bool) -> &'static str {
     match mode {
+        Mode::Both | Mode::From(_) if receive_only => "receiveonly",
         Mode::Both | Mode::Off => "sendreceive",
         Mode::From(id) if id == device => "sendonly",
         Mode::From(_) => "receiveonly",
@@ -211,8 +213,8 @@ mod tests {
 
     fn rs() -> RuleSet {
         let mut d = BTreeMap::new();
-        d.insert(A.into(), Device { name: "lin".into(), os: Os::Linux });
-        d.insert(B.into(), Device { name: "win".into(), os: Os::Windows });
+        d.insert(A.into(), Device { name: "lin".into(), os: Os::Linux, receive_only: false });
+        d.insert(B.into(), Device { name: "win".into(), os: Os::Windows, receive_only: false });
         RuleSet::new(d)
     }
     fn from_a() -> Mode {
@@ -242,8 +244,10 @@ mod tests {
         assert_eq!(f[0].rel, "");
         assert_eq!(f[0].mode, from_a());
         assert!(f[0].lines.is_empty());
-        assert_eq!(folder_type(&f[0].mode, A), "sendonly");
-        assert_eq!(folder_type(&f[0].mode, B), "receiveonly");
+        assert_eq!(folder_type(&f[0].mode, A, false), "sendonly");
+        assert_eq!(folder_type(&f[0].mode, B, false), "receiveonly");
+        assert_eq!(folder_type(&Mode::Both, B, true), "receiveonly");
+        assert_eq!(folder_type(&Mode::Both, A, false), "sendreceive");
     }
 
     #[test]

@@ -27,7 +27,7 @@ export function modeOf(dir: Dir, me: DeviceView, other: DeviceView): string {
  * computers run different systems, otherwise its device name.
  */
 export function called(other: DeviceView, me: DeviceView): string {
-  if (other.os === me.os) return other.name
+  if (!other.os || other.os === me.os) return other.name
   return { windows: 'Windows', linux: 'Linux', macos: 'Mac' }[other.os]
 }
 
@@ -55,6 +55,14 @@ export function sentence(d: Dir, there: string): string {
     case 'in':
       return `${there}'s files are copied to this computer. Edits and deletes made on ${there} reach here. Edits you make here stay here and are not copied back.`
   }
+}
+
+/** How a computer is doing with the current sync choices, in a few words. */
+export function deviceState(d: DeviceView, revision: number | null): { text: string; tone: 'ok' | 'busy' | 'wait' } {
+  if (d.held) return { text: 'needs you', tone: 'wait' }
+  if (!d.inRules) return { text: 'not syncing yet', tone: 'wait' }
+  if (revision !== null && d.appliedRevision !== null && d.appliedRevision >= revision) return { text: 'up to date', tone: 'ok' }
+  return { text: 'setting up', tone: 'busy' }
 }
 
 export function bytes(n: number): string {

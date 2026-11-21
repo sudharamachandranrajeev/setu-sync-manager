@@ -15,7 +15,10 @@ use setu_core::control::now_secs;
 use setu_core::preview::Preview;
 use setu_core::watch;
 use setu_core::local::{config_dir, LocalConfig};
+use setu_core::accuracy::Mismatch;
+use setu_core::hub::{DeviceState, Held};
 use setu_core::rules::{short_id, Kind, Mode, Os, RuleSet};
+use setu_core::tidy::Removed;
 use setu_core::session::Session;
 use setu_core::trust::{Conflict, FolderCheck, Kept, Restored};
 use setu_core::Error;
@@ -38,11 +41,26 @@ struct DeviceView {
     id: String,
     short: String,
     name: String,
-    os: Os,
+    os: Option<Os>,
     connected: bool,
     address: Option<String>,
     applied_revision: Option<u64>,
     applied_at: Option<u64>,
+    /// In the rules (it syncs), and whether it only receives.
+    in_rules: bool,
+    receive_only: bool,
+    /// New rules wait for the person on that computer, and why.
+    held: Option<Held>,
+    problems: Vec<String>,
+    /// When it last reported to the Brahma account (Unix seconds).
+    seen_at: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountView {
+    server: String,
+    email: String,
 }
 
 #[derive(Serialize)]
@@ -79,8 +97,12 @@ struct EditView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct View {
-    /// "setup" (choose this computer's folder), "rules" (create the first rules) or "ready".
+    /// "setup" (choose this computer's folder), "signin" (sign in to the Brahma account), "join"
+    /// (add this computer to the rules) or "ready".
     stage: &'static str,
+    account: Option<AccountView>,
+    /// Every computer in the account and the rules, this one first.
+    devices: Vec<DeviceView>,
     message: Option<String>,
     root: Option<String>,
     me: Option<DeviceView>,
@@ -190,9 +212,45 @@ fn edits(shared: Option<&RuleSet>, working: &RuleSet) -> Vec<EditView> {
     v
 }
 
+/// The account's computers and the ones the rules name, with how each is doing.
+fn devices(s: &Session, rules: Option<&RuleSet>) -> Vec<DeviceView> {
+    let conns = s.client.connections().unwrap_or_default();
+    let states: Vec<DeviceState> = s.hub.devices().unwrap_or_default();
+    let mut ids: Vec<String> = vec![s.ctx.me.clone()];
+    for id in rules.into_iter().flat_map(|r| r.devices.keys()).chain(states.iter().map(|d| &d.id)) {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    ids.into_iter()
+        .map(|id| {
+            let st = states.iter().find(|d| d.id == id);
+            let rd = rules.and_then(|r| r.devices.get(&id));
+            let c = &conns["connections"][&id];
+            DeviceView {
+                short: short_id(&id).to_string(),
+                name: rd.map(|d| d.name.clone()).or_else(|| st.map(|d| d.name.clone())).unwrap_or_else(|| short_id(&id).to_string()),
+                os: rd.map(|d| d.os).or_else(|| st.and_then(|d| d.os)),
+                connected: id == s.ctx.me || c["connected"].as_bool().unwrap_or(false),
+                address: c["address"].as_str().filter(|a| !a.is_empty()).map(String::from),
+                applied_revision: st.filter(|d| d.applied_at > 0).map(|d| d.applied_revision),
+                applied_at: st.filter(|d| d.applied_at > 0).map(|d| d.applied_at),
+                in_rules: rd.is_some(),
+                receive_only: rd.is_some_and(|d| d.receive_only),
+                held: st.and_then(|d| d.held.clone()),
+                problems: st.map(|d| d.problems.clone()).unwrap_or_default(),
+                seen_at: st.map(|d| d.updated_at).filter(|&t| t > 0),
+                id,
+            }
+        })
+        .collect()
+}
+
 fn view(st: &mut AppState) -> View {
     let mut v = View {
         stage: "setup",
+        account: None,
+        devices: Vec::new(),
         message: None,
         root: None,
         me: None,
@@ -217,10 +275,16 @@ fn view(st: &mut AppState) -> View {
     let s = st.session.as_ref().unwrap();
     v.root = Some(s.local.root.to_string_lossy().into_owned());
     v.conflicts = s.control.conflicts();
+    v.account = s.hub.account().map(|a| AccountView { server: a.server, email: a.email });
+    if v.account.is_none() {
+        v.stage = "signin";
+        return v;
+    }
     let shared = match s.shared() {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            v.stage = "rules";
+        Ok(Some(r)) if r.devices.contains_key(&s.ctx.me) => r,
+        Ok(_) => {
+            v.stage = "join";
+            v.devices = devices(s, None);
             return v;
         }
         Err(e) => {
@@ -229,24 +293,10 @@ fn view(st: &mut AppState) -> View {
         }
     };
     let working = s.working().unwrap_or_else(|_| shared.clone());
-    let conns = s.client.connections().unwrap_or_default();
-    let dev = |id: &String| {
-        let d = &shared.devices[id];
-        let c = &conns["connections"][id];
-        let status = s.control.read_status(id);
-        DeviceView {
-            id: id.clone(),
-            short: short_id(id).to_string(),
-            name: d.name.clone(),
-            os: d.os,
-            connected: c["connected"].as_bool().unwrap_or(false),
-            address: c["address"].as_str().filter(|a| !a.is_empty()).map(String::from),
-            applied_revision: status.as_ref().map(|x| x.applied_revision),
-            applied_at: status.as_ref().map(|x| x.applied_at),
-        }
-    };
-    v.me = Some(dev(&s.ctx.me));
-    v.other = s.other_device(&shared).map(|o| dev(&o));
+    v.devices = devices(s, Some(&shared));
+    v.me = v.devices.iter().position(|d| d.id == s.ctx.me).map(|i| v.devices.remove(i));
+    v.other = v.devices.iter().position(|d| d.in_rules).map(|i| v.devices.remove(i));
+    // `devices` keeps the rest; the window shows me, other, then these.
     v.shared_revision = Some(shared.revision);
     v.root_mode = Some(working.root.to_string());
     v.edits = edits(Some(&shared), &working);
@@ -437,12 +487,146 @@ async fn init(state: State<'_>, root: String) -> Result<View, String> {
     Ok(view(&mut st))
 }
 
+/// Sign in to the Brahma account. "recovery-key-needed" when the password was reset and the
+/// recovery key must unlock the data.
 #[tauri::command]
-async fn create_rules(state: State<'_>, other_os: Os) -> Result<View, String> {
+async fn sign_in(state: State<'_>, server: String, email: String, password: String) -> Result<View, String> {
     let mut st = state.lock().unwrap();
     open(&mut st)?;
-    st.session.as_ref().unwrap().init_rules(other_os).map_err(err)?;
+    let s = st.session.as_ref().unwrap();
+    match s.hub.sign_in(server.trim(), email.trim(), &password) {
+        Err(Error::RecoveryKeyNeeded) => return Err("recovery-key-needed".into()),
+        r => r.map_err(err)?,
+    }
+    after_sign_in(s);
     Ok(view(&mut st))
+}
+
+#[tauri::command]
+async fn recovery(state: State<'_>, key: String) -> Result<View, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    let s = st.session.as_ref().unwrap();
+    s.hub.unlock_with_recovery_key(key.trim()).map_err(err)?;
+    after_sign_in(s);
+    Ok(view(&mut st))
+}
+
+/// Keep Syncthing on the tailnet and fetch the account's rows. Problems here are not fatal:
+/// the view shows what is missing.
+fn after_sign_in(s: &Session) {
+    if let Err(e) = setu_core::mesh::harden(&s.client, &setu_core::mesh::tailnet_ips()) {
+        eprintln!("setu: {e}");
+    }
+    if let Err(e) = s.sync_hub() {
+        eprintln!("setu: Brahma sync: {e}");
+    }
+}
+
+#[tauri::command]
+async fn sign_out(state: State<'_>) -> Result<View, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    st.session.as_ref().unwrap().hub.sign_out().map_err(err)?;
+    Ok(view(&mut st))
+}
+
+/// Add this computer to the rules. `receive_only`: a backup copy that never sends changes.
+#[tauri::command]
+async fn join(state: State<'_>, receive_only: bool) -> Result<View, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    st.session.as_ref().unwrap().join(receive_only).map_err(err)?;
+    Ok(view(&mut st))
+}
+
+/// Ask the helper to fetch new rules and check the copies now.
+#[tauri::command]
+async fn check_now() -> Result<(), String> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(setu_core::helper::CHECK_REQUEST), b"").map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccuracyRow {
+    top: String,
+    files: u64,
+    bytes: u64,
+    checked_at: u64,
+    /// One entry per other computer: "same", "differs", "syncing" or "unchecked".
+    others: Vec<(String, String, &'static str)>,
+}
+
+/// The last content check: per top folder, does each other computer hold the same files?
+#[tauri::command]
+async fn accuracy(state: State<'_>) -> Result<Vec<AccuracyRow>, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    let s = st.session.as_ref().unwrap();
+    let all = s.hub.devices().map_err(err)?;
+    let Some(me) = all.iter().find(|d| d.id == s.ctx.me) else { return Ok(Vec::new()) };
+    Ok(me
+        .digests
+        .iter()
+        .map(|(top, mine)| AccuracyRow {
+            top: top.clone(),
+            files: mine.files,
+            bytes: mine.bytes,
+            checked_at: mine.at,
+            others: all
+                .iter()
+                .filter(|d| d.id != me.id)
+                .map(|d| {
+                    let word = match d.digests.get(top) {
+                        None => "unchecked",
+                        Some(g) if g.hash == mine.hash => "same",
+                        Some(g) if g.settled && mine.settled => "differs",
+                        Some(_) => "syncing",
+                    };
+                    (d.id.clone(), d.name.clone(), word)
+                })
+                .collect(),
+        })
+        .collect())
+}
+
+/// Files that differ from another computer in one top folder, or `None` while its list is on
+/// the way.
+#[tauri::command]
+async fn differences(state: State<'_>, device: String, top: String) -> Result<Option<Vec<Mismatch>>, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    Ok(st.session.as_ref().unwrap().mismatches(&device, &top))
+}
+
+/// Remove sync leftovers identical to their file now.
+#[tauri::command]
+async fn tidy_now(state: State<'_>) -> Result<Vec<Removed>, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    let r = st.session.as_ref().unwrap().tidy().map_err(err)?;
+    st.local = None;
+    Ok(r)
+}
+
+/// What tidy removed, newest first.
+#[tauri::command]
+async fn tidy_log() -> Result<Vec<Removed>, String> {
+    let mut log = setu_core::tidy::read_log(&config_dir());
+    log.reverse();
+    Ok(log)
+}
+
+#[tauri::command]
+async fn undo_tidy(state: State<'_>, path: String) -> Result<Vec<Removed>, String> {
+    let mut st = state.lock().unwrap();
+    setu_core::tidy::undo(&config_dir(), std::path::Path::new(&path)).map_err(err)?;
+    st.local = None;
+    let mut log = setu_core::tidy::read_log(&config_dir());
+    log.reverse();
+    Ok(log)
 }
 
 #[tauri::command]
@@ -519,7 +703,7 @@ pub fn run() {
             tray::setup(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![state, refresh, children, set_rule, set_leave_out, set_pause, discard, plan, apply, init, create_rules, set_allow, resume, conflicts, keep, versions, restore, verify])
+        .invoke_handler(tauri::generate_handler![state, refresh, children, set_rule, set_leave_out, set_pause, discard, plan, apply, init, sign_in, recovery, sign_out, join, check_now, accuracy, differences, tidy_now, tidy_log, undo_tidy, set_allow, resume, conflicts, keep, versions, restore, verify])
         .run(tauri::generate_context!())
         .expect("error while running Setu");
 }

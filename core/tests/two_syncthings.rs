@@ -4,104 +4,17 @@
 //! Slow (about a minute), so it is ignored by default: `cargo test -- --ignored`.
 
 use std::collections::BTreeMap;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use serde_json::json;
 use setu_core::apply::{self, Action, Ctx};
-use setu_core::control::Control;
 use setu_core::rules::{Device, Kind, Mode, Os, RuleSet};
 use setu_core::syncthing::Client;
 
-struct St {
-    child: Child,
-    client: Client,
-    id: String,
-    listen: u16,
-}
-
-impl Drop for St {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
-}
-
-fn start(dir: &Path) -> St {
-    let home = dir.join("home");
-    let ok = Command::new("syncthing")
-        .args(["generate", &format!("--home={}", home.display()), "--no-port-probing"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("syncthing runs");
-    assert!(ok.success());
-    let (gui, listen) = (free_port(), free_port());
-    let cfg = home.join("config.xml");
-    let mut x = std::fs::read_to_string(&cfg).unwrap();
-    for (from, to) in [
-        ("<listenAddress>default</listenAddress>".to_string(), format!("<listenAddress>tcp://127.0.0.1:{listen}</listenAddress>")),
-        ("<globalAnnounceEnabled>true</globalAnnounceEnabled>".into(), "<globalAnnounceEnabled>false</globalAnnounceEnabled>".into()),
-        ("<localAnnounceEnabled>true</localAnnounceEnabled>".into(), "<localAnnounceEnabled>false</localAnnounceEnabled>".into()),
-        ("<relaysEnabled>true</relaysEnabled>".into(), "<relaysEnabled>false</relaysEnabled>".into()),
-        ("<natEnabled>true</natEnabled>".into(), "<natEnabled>false</natEnabled>".into()),
-        ("<startBrowser>true</startBrowser>".into(), "<startBrowser>false</startBrowser>".into()),
-        ("<crashReportingEnabled>true</crashReportingEnabled>".into(), "<crashReportingEnabled>false</crashReportingEnabled>".into()),
-        ("<urAccepted>0</urAccepted>".into(), "<urAccepted>-1</urAccepted>".into()),
-    ] {
-        x = x.replace(&from, &to);
-    }
-    x = regex_replace_gui(&x, gui);
-    std::fs::write(&cfg, x).unwrap();
-    let log = std::fs::File::create(dir.join("syncthing.log")).unwrap();
-    let child = Command::new("syncthing")
-        .args(["serve", &format!("--home={}", home.display()), "--no-browser", "--no-restart"])
-        .env("STNODEFAULTFOLDER", "1")
-        .env("STNOUPGRADE", "1")
-        .env_remove("STHOMEDIR")
-        .stdout(log.try_clone().unwrap())
-        .stderr(log)
-        .spawn()
-        .unwrap();
-    let client = Client::discover(Some(&home)).unwrap();
-    let id = wait_for(60, || client.my_id().ok()).expect("syncthing REST comes up");
-    St { child, client, id, listen }
-}
-
-/// Point the GUI at our own port (the generated config uses 127.0.0.1:8384).
-fn regex_replace_gui(x: &str, port: u16) -> String {
-    let start = x.find("<gui ").expect("gui section");
-    let a = x[start..].find("<address>").unwrap() + start + "<address>".len();
-    let b = x[a..].find("</address>").unwrap() + a;
-    format!("{}127.0.0.1:{port}{}", &x[..a], &x[b..])
-}
-
-fn wait_for<T>(secs: u64, mut f: impl FnMut() -> Option<T>) -> Option<T> {
-    let end = Instant::now() + Duration::from_secs(secs);
-    while Instant::now() < end {
-        if let Some(v) = f() {
-            return Some(v);
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    None
-}
-
-fn put(root: &Path, rel: &str, text: &str) {
-    let p = root.join(rel);
-    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(p, text).unwrap();
-}
-
-fn read(root: &Path, rel: &str) -> Option<String> {
-    std::fs::read_to_string(root.join(rel)).ok()
-}
+mod common;
+use common::*;
 
 fn add_peer(me: &St, other: &St, name: &str) {
     let dev = json!({ "deviceID": other.id, "name": name, "addresses": [format!("tcp://127.0.0.1:{}", other.listen)] });
@@ -156,8 +69,8 @@ fn two_computers_sync_by_the_rules() {
     put(&rb, "both/y.txt", "y");
 
     let mut devices = BTreeMap::new();
-    devices.insert(a.id.clone(), Device { name: "a".into(), os: Os::Linux });
-    devices.insert(b.id.clone(), Device { name: "b".into(), os: Os::Linux });
+    devices.insert(a.id.clone(), Device { name: "a".into(), os: Os::Linux, receive_only: false });
+    devices.insert(b.id.clone(), Device { name: "b".into(), os: Os::Linux, receive_only: false });
     let mut rs = RuleSet::new(devices);
     let from_a = Mode::From(a.id.clone());
     rs.set("shared", Kind::Dir, Some(from_a.clone())).unwrap();
@@ -171,12 +84,11 @@ fn two_computers_sync_by_the_rules() {
 
     let ca = Ctx { me: a.id.clone(), root: ra.clone(), os: Os::Linux };
     let cb = Ctx { me: b.id.clone(), root: rb.clone(), os: Os::Linux };
-    let (ctl_a, ctl_b) = (Control::at(da.join("control")), Control::at(db.join("control")));
-    for (ctx, st, ctl) in [(&ca, &a, &ctl_a), (&cb, &b, &ctl_b)] {
+    for (ctx, st) in [(&ca, &a), (&cb, &b)] {
         let plan = apply::plan(ctx, &rs, &st.client).unwrap();
         assert!(plan.problems.is_empty(), "{:?}", plan.problems);
         assert_eq!(plan.folders, 6, "shared, both, fromb, mixed, we[ird], files-only root");
-        apply::execute(ctx, &rs, &plan, &st.client, Some(ctl)).unwrap();
+        apply::execute(ctx, &rs, &plan, &st.client).unwrap();
     }
 
     // What should arrive does.
@@ -206,8 +118,6 @@ fn two_computers_sync_by_the_rules() {
     for rel in ["mixed/skip.txt", "aonly/sec.txt", "shared/API keys/k.txt"] {
         assert!(read(&rb, rel).is_none(), "{rel} must not reach B");
     }
-    // Status files crossed through the control folder.
-    assert!(wait_for(60, || ctl_a.read_status(&b.id)).is_some_and(|s| s.applied_revision == 1));
 
     // One way means one way: B's edit to a received file never comes back to A.
     put(&rb, "shared/a.txt", "edited on B");
@@ -285,10 +195,10 @@ fn two_computers_sync_by_the_rules() {
     // Revision 2: switch "both" off. The folder goes from Syncthing; its files stay on both sides.
     rs.set("both", Kind::Dir, None).unwrap();
     rs.revision = 2;
-    for (ctx, st, ctl) in [(&ca, &a, &ctl_a), (&cb, &b, &ctl_b)] {
+    for (ctx, st) in [(&ca, &a), (&cb, &b)] {
         let plan = apply::plan(ctx, &rs, &st.client).unwrap();
         assert!(matches!(plan.actions.as_slice(), [Action::Remove { .. }]), "{:?}", plan.actions);
-        apply::execute(ctx, &rs, &plan, &st.client, Some(ctl)).unwrap();
+        apply::execute(ctx, &rs, &plan, &st.client).unwrap();
     }
     for (root, rel) in [(&ra, "both/x.txt"), (&rb, "both/x.txt"), (&ra, "both/y.txt"), (&rb, "both/y.txt")] {
         assert!(read(root, rel).is_some(), "{rel} must stay in {}", root.display());

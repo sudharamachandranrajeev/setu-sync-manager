@@ -2,15 +2,34 @@ import { invoke } from '@tauri-apps/api/core'
 
 export type Os = 'linux' | 'windows' | 'macos'
 
+export interface Held {
+  revision: number
+  reasons: string[]
+}
+
 export interface DeviceView {
   id: string
   short: string
   name: string
-  os: Os
+  os: Os | null
   connected: boolean
   address: string | null
   appliedRevision: number | null
   appliedAt: number | null
+  /** Named in the sync choices. */
+  inRules: boolean
+  /** A backup copy: only receives, never sends changes back. */
+  receiveOnly: boolean
+  /** New choices wait for the person on that computer, and why. */
+  held: Held | null
+  problems: string[]
+  /** Last report to the Brahma account (Unix seconds). */
+  seenAt: number | null
+}
+
+export interface AccountView {
+  server: string
+  email: string
 }
 
 export interface EditView {
@@ -38,7 +57,10 @@ export interface WatchView {
 }
 
 export interface View {
-  stage: 'setup' | 'rules' | 'ready'
+  stage: 'setup' | 'signin' | 'join' | 'ready'
+  account: AccountView | null
+  /** Computers besides this one and the main other one (or all, before joining). */
+  devices: DeviceView[]
   message: string | null
   root: string | null
   me: DeviceView | null
@@ -179,6 +201,30 @@ export interface FolderCheck {
   ok: boolean
 }
 
+export interface AccuracyRow {
+  top: string
+  files: number
+  bytes: number
+  checkedAt: number
+  /** [id, name, 'same' | 'differs' | 'syncing' | 'unchecked'] per other computer. */
+  others: [string, string, 'same' | 'differs' | 'syncing' | 'unchecked'][]
+}
+
+export interface Mismatch {
+  path: string
+  what: string
+}
+
+export interface Removed {
+  at: number
+  kind: string
+  removed: string
+  kept: string
+  size: number
+  sha256: string
+  undone: boolean
+}
+
 export const api = {
   state: () => invoke<View>('state'),
   refresh: () => invoke<View>('refresh'),
@@ -192,7 +238,16 @@ export const api = {
   init: (root: string) => invoke<View>('init', { root }),
   setAllow: (what: 'metered' | 'relay', on: boolean) => invoke<View>('set_allow', { what, on }),
   resume: (folder: string) => invoke<View>('resume', { folder }),
-  createRules: (otherOs: Os) => invoke<View>('create_rules', { otherOs }),
+  signIn: (server: string, email: string, password: string) => invoke<View>('sign_in', { server, email, password }),
+  recovery: (key: string) => invoke<View>('recovery', { key }),
+  signOut: () => invoke<View>('sign_out'),
+  join: (receiveOnly: boolean) => invoke<View>('join', { receiveOnly }),
+  checkNow: () => invoke<void>('check_now'),
+  accuracy: () => invoke<AccuracyRow[]>('accuracy'),
+  differences: (device: string, top: string) => invoke<Mismatch[] | null>('differences', { device, top }),
+  tidyNow: () => invoke<Removed[]>('tidy_now'),
+  tidyLog: () => invoke<Removed[]>('tidy_log'),
+  undoTidy: (path: string) => invoke<Removed[]>('undo_tidy', { path }),
   conflicts: () => invoke<Conflict[]>('conflicts'),
   keep: (copy: string, keepCopy: boolean) => invoke<Conflict[]>('keep', { copy, keepCopy }),
   versions: () => invoke<Kept[]>('versions'),

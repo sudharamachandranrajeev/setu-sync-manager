@@ -11,6 +11,8 @@ use crate::Error;
 
 pub const FORMAT: &str = "setu-rules";
 pub const VERSION: u32 = 1;
+/// How many computers one set of rules can name.
+pub const MAX_DEVICES: usize = 8;
 
 /// Which way a path syncs.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -100,6 +102,10 @@ impl Os {
 pub struct Device {
     pub name: String,
     pub os: Os,
+    /// A backup copy: this computer only ever receives, whatever the rules say, so nothing
+    /// changed or deleted on it reaches the others.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub receive_only: bool,
 }
 
 /// Never synced, whatever the rules say. These come first in every ignore file, and the first
@@ -169,7 +175,7 @@ pub struct RuleSet {
     pub version: u32,
     /// Goes up by one on every apply, so each computer can tell which rules it has applied.
     pub revision: u64,
-    /// The two computers, by Syncthing device ID.
+    /// The computers, by Syncthing device ID.
     pub devices: BTreeMap<String, Device>,
     /// The choice for the root folder itself.
     pub root: Mode,
@@ -181,7 +187,7 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
-    /// New rules for two devices: everything off.
+    /// New rules: everything off.
     pub fn new(devices: BTreeMap<String, Device>) -> RuleSet {
         RuleSet {
             format: FORMAT.into(),
@@ -212,8 +218,8 @@ impl RuleSet {
         if self.version != VERSION {
             return bad(format!("rules version {} is not supported by this Setu", self.version));
         }
-        if self.devices.len() != 2 {
-            return bad(format!("rules must name exactly two devices, found {}", self.devices.len()));
+        if self.devices.is_empty() || self.devices.len() > MAX_DEVICES {
+            return bad(format!("rules must name 1 to {MAX_DEVICES} computers, found {}", self.devices.len()));
         }
         for id in self.devices.keys() {
             if !valid_device_id(id) {
@@ -223,6 +229,9 @@ impl RuleSet {
         let check_mode = |m: &Mode, at: &str| match m {
             Mode::From(id) if !self.devices.contains_key(id) => {
                 Err(Error::Rules(format!("{at}: sends from a device the rules do not name")))
+            }
+            Mode::From(id) if self.devices[id].receive_only => {
+                Err(Error::Rules(format!("{at}: {} is a backup copy, so it cannot be the one that sends", self.devices[id].name)))
             }
             _ => Ok(()),
         };
@@ -304,6 +313,11 @@ impl RuleSet {
         Ok(())
     }
 
+    /// Is `id` a backup copy that only receives?
+    pub fn receive_only(&self, id: &str) -> bool {
+        self.devices.get(id).is_some_and(|d| d.receive_only)
+    }
+
     pub fn device_name<'a>(&'a self, id: &'a str) -> &'a str {
         self.devices.get(id).map(|d| d.name.as_str()).unwrap_or(id)
     }
@@ -355,8 +369,8 @@ mod tests {
 
     fn two() -> RuleSet {
         let mut d = BTreeMap::new();
-        d.insert(A.into(), Device { name: "lin".into(), os: Os::Linux });
-        d.insert(B.into(), Device { name: "win".into(), os: Os::Windows });
+        d.insert(A.into(), Device { name: "lin".into(), os: Os::Linux, receive_only: false });
+        d.insert(B.into(), Device { name: "win".into(), os: Os::Windows, receive_only: false });
         RuleSet::new(d)
     }
 

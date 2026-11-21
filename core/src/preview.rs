@@ -287,8 +287,8 @@ mod tests {
 
     fn rules() -> RuleSet {
         let mut d = BTreeMap::new();
-        d.insert(A.to_string(), Device { name: "a".into(), os: Os::Linux });
-        d.insert(B.to_string(), Device { name: "b".into(), os: Os::Windows });
+        d.insert(A.to_string(), Device { name: "a".into(), os: Os::Linux, receive_only: false });
+        d.insert(B.to_string(), Device { name: "b".into(), os: Os::Windows, receive_only: false });
         RuleSet::new(d)
     }
 

@@ -114,7 +114,7 @@
     <div class="body">
       <p class="small">Tick the folders to copy and untick the ones to leave out, such as big projects. Biggest are at the top.</p>
       {#if !remoteKnown}
-        <p class="note small">{there}'s file list has not arrived yet, so sizes show this computer only. Open Setu on {there} once to fix this.</p>
+        <p class="note small">{there}'s file list has not arrived yet, so sizes show this computer only. It arrives by itself while Setu runs on {there}.</p>
       {/if}
       <div class="allrow">
         <label>

@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::compile::{compile, folder_type, render, Problem, FOLDER_PREFIX, HEADER};
-use crate::control::{now_secs, Control, Status};
+use crate::control::now_secs;
 use crate::local::{expand_home, join_rel};
 use crate::rules::{Os, RuleSet};
 use crate::syncthing::Client;
@@ -128,7 +128,7 @@ pub fn plan(ctx: &Ctx, rs: &RuleSet, client: &Client) -> Result<Plan, Error> {
     let mut adds = Vec::new();
     for spec in &specs {
         let path = join_rel(&ctx.root, &spec.rel);
-        let ftype = folder_type(&spec.mode, &ctx.me).to_string();
+        let ftype = folder_type(&spec.mode, &ctx.me, rs.receive_only(&ctx.me)).to_string();
         let lines = render(spec, &rs.always_ignore, ctx.os);
         let shown = path.to_string_lossy().into_owned();
 
@@ -208,14 +208,14 @@ fn describe(t: &str) -> &'static str {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Report {
     pub added: usize,
     pub updated: usize,
     pub removed: usize,
 }
 
-pub fn execute(ctx: &Ctx, rs: &RuleSet, plan: &Plan, client: &Client, control: Option<&Control>) -> Result<Report, Error> {
+pub fn execute(ctx: &Ctx, rs: &RuleSet, plan: &Plan, client: &Client) -> Result<Report, Error> {
     if !plan.problems.is_empty() {
         return Err(Error::Rules(format!("{} problem(s) must be fixed first", plan.problems.len())));
     }
@@ -258,17 +258,6 @@ pub fn execute(ctx: &Ctx, rs: &RuleSet, plan: &Plan, client: &Client, control: O
                 report.added += 1;
             }
         }
-    }
-    if let Some(c) = control {
-        c.write_status(&Status {
-            device: ctx.me.clone(),
-            name: rs.device_name(&ctx.me).to_string(),
-            os: ctx.os,
-            applied_revision: rs.revision,
-            applied_at: now_secs(),
-            folders: plan.folders,
-            problems: Vec::new(),
-        })?;
     }
     Ok(report)
 }

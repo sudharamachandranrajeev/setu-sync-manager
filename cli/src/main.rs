@@ -8,7 +8,7 @@ use setu_core::apply::{Action, Plan};
 use setu_core::index::Tree;
 use setu_core::local::{config_dir, LocalConfig};
 use setu_core::preview::Preview;
-use setu_core::rules::{short_id, Kind, Mode, Os, RuleSet};
+use setu_core::rules::{short_id, Kind, Mode, RuleSet};
 use setu_core::session::Session;
 use setu_core::watch;
 use setu_core::Error;
@@ -16,12 +16,23 @@ use setu_core::Error;
 mod notify;
 
 const USAGE: &str = "\
-setu: choose what syncs between two computers, and which way.
+setu: choose what syncs between your computers, and which way.
 
   setu init --root <folder>          Set this computer's folder (once)
-  setu create-rules [--other-os linux|windows|macos]
-                                     First rules, everything off (once, on one computer)
-  setu status                        This computer, the other one, and the rules
+  setu sign-in <server> <email>      Sign in to your Brahma account (asks for the password).
+                                     Your computers find each other through it
+  setu recovery-key                  Unlock with your recovery key after a password reset
+  setu sign-out                      Sign out here (syncing stops being coordinated)
+  setu join [--backup]               Add this computer to the rules (--backup: it only
+                                     receives, never sends changes back)
+  setu status                        This computer, the others, and the rules
+  setu devices                       Your computers: rules in use, waiting, last seen
+  setu check                         Compare file contents with the other computers now
+  setu differences <computer> <top-folder>
+                                     Files that differ from that computer, one by one
+  setu tidy                          Remove sync leftovers identical to their file
+  setu tidy-log                      What tidy removed
+  setu undo <removed-path>           Put a removed copy back
   setu rule <path> <choice> [--file] Change a choice in the draft. <choice> is
                                      off, both, inherit, from-here, from-other
   setu rules                         Show the rules being worked on
@@ -76,18 +87,102 @@ fn run(args: &[String]) -> Result<(), Error> {
             println!("This computer's folder: {}", cfg.root.display());
             Ok(())
         }
-        "create-rules" => {
-            let s = Session::open()?;
-            let os = match flag(args, "--other-os").as_deref() {
-                Some("linux") => Os::Linux,
-                Some("windows") => Os::Windows,
-                Some("macos") => Os::Macos,
-                Some(o) => return Err(Error::Setup(format!("unknown OS {o:?}"))),
-                None if s.ctx.os == Os::Windows => Os::Linux,
-                None => Os::Windows,
+        "sign-in" => {
+            let (Some(server), Some(email)) = (args.get(1), args.get(2)) else {
+                return Err(Error::Setup("usage: setu sign-in <server> <email>".into()));
             };
-            let rs = s.init_rules(os)?;
-            println!("Rules revision {} for {}.", rs.revision, names(&rs));
+            let s = Session::open()?;
+            let pw = rpassword::prompt_password("Brahma password: ")?;
+            match s.hub.sign_in(server, email, &pw) {
+                Err(Error::RecoveryKeyNeeded) => {
+                    println!("Your password was reset. Run `setu recovery-key` to unlock your data.");
+                    return Ok(());
+                }
+                r => r?,
+            }
+            println!("Signed in as {email}.");
+            after_sign_in(&s)
+        }
+        "recovery-key" => {
+            let s = Session::open()?;
+            let key = rpassword::prompt_password("Recovery key: ")?;
+            s.hub.unlock_with_recovery_key(key.trim())?;
+            println!("Unlocked.");
+            after_sign_in(&s)
+        }
+        "sign-out" => {
+            Session::open()?.hub.sign_out()?;
+            println!("Signed out. Folders already set up keep syncing; new choices no longer arrive.");
+            Ok(())
+        }
+        "join" => {
+            let s = Session::open()?;
+            if !s.hub.signed_in() {
+                return Err(Error::Setup("sign in first: setu sign-in <server> <email>".into()));
+            }
+            let rs = s.join(args.iter().any(|a| a == "--backup"))?;
+            println!("Rules revision {} for {}. Choose folders with `setu rule`, then `setu apply`.", rs.revision, names(&rs));
+            Ok(())
+        }
+        "devices" => devices(&Session::open()?),
+        "check" => {
+            let s = Session::open()?;
+            let digests = s.check_accuracy()?;
+            let mut differ = 0;
+            for d in s.hub.devices()?.iter().filter(|d| d.id != s.ctx.me) {
+                for (top, mine) in &digests {
+                    match d.digests.get(top) {
+                        Some(theirs) if theirs.hash == mine.hash => {}
+                        Some(_) if !mine.settled || !theirs_settled(d, top) => println!("  {top}: still syncing with {}", d.name),
+                        Some(_) => {
+                            differ += 1;
+                            println!("  {top}: differs from {} (`setu differences {} {top}`)", d.name, short_id(&d.id));
+                        }
+                        None => println!("  {top}: {} has not checked it yet", d.name),
+                    }
+                }
+            }
+            println!("Checked {} top folders here.", digests.len());
+            if differ > 0 {
+                return Err(Error::Setup(format!("{differ} folder(s) differ")));
+            }
+            Ok(())
+        }
+        "differences" => {
+            let (Some(who), Some(top)) = (args.get(1), args.get(2)) else {
+                return Err(Error::Setup("usage: setu differences <computer> <top-folder>".into()));
+            };
+            let s = Session::open()?;
+            let id = s.hub.devices()?.into_iter().find(|d| d.id.starts_with(who.as_str()) || d.name == *who).map(|d| d.id).ok_or_else(|| Error::Setup(format!("no computer {who:?} in your account")))?;
+            let Some(m) = s.mismatches(&id, top) else {
+                println!("The file lists for {top} have not arrived yet. Run `setu check` on both computers.");
+                return Ok(());
+            };
+            for x in &m {
+                println!("  {}: {}", x.path, x.what);
+            }
+            println!("{} difference(s).", m.len());
+            Ok(())
+        }
+        "tidy" => {
+            let removed = Session::open()?.tidy()?;
+            for r in &removed {
+                println!("  removed {} ({}, same as {})", r.removed.display(), r.kind, r.kept.display());
+            }
+            println!("{} copies removed. `setu undo <path>` puts one back.", removed.len());
+            Ok(())
+        }
+        "tidy-log" => {
+            for r in setu_core::tidy::read_log(&config_dir()) {
+                let undone = if r.undone { " (put back)" } else { "" };
+                println!("  {} {} {} ({}){undone}", r.at, r.kind, r.removed.display(), size(r.size));
+            }
+            Ok(())
+        }
+        "undo" => {
+            let path = args.get(1).ok_or_else(|| Error::Setup("usage: setu undo <removed-path>".into()))?;
+            setu_core::tidy::undo(&config_dir(), std::path::Path::new(path))?;
+            println!("Put back: {path}");
             Ok(())
         }
         "status" => status(&Session::open()?),
@@ -131,7 +226,7 @@ fn run(args: &[String]) -> Result<(), Error> {
             if !plan.problems.is_empty() {
                 return Err(Error::Rules("fix the problems above first".into()));
             }
-            if plan.is_empty() && s.shared()?.is_some_and(|r| s.control.read_status(&s.ctx.me).map(|st| st.applied_revision) == Some(r.revision)) {
+            if plan.is_empty() && s.shared()?.is_some_and(|r| s.hub.device(&s.ctx.me).ok().flatten().is_some_and(|d| d.applied_revision == r.revision)) {
                 println!("Nothing to do.");
                 return Ok(());
             }
@@ -341,6 +436,54 @@ fn run(args: &[String]) -> Result<(), Error> {
     }
 }
 
+/// After signing in: keep Syncthing on the tailnet, and say what changed.
+fn after_sign_in(s: &Session) -> Result<(), Error> {
+    match setu_core::mesh::harden(&s.client, &setu_core::mesh::tailnet_ips()) {
+        Ok(changed) if !changed.is_empty() => println!("Syncthing now stays on Tailscale (changed: {}).", changed.join(", ")),
+        Ok(_) => {}
+        Err(e) => println!("Note: {e}"),
+    }
+    s.sync_hub()?;
+    if s.shared()?.is_some_and(|r| r.devices.contains_key(&s.ctx.me)) {
+        println!("This computer is in your rules already; the helper (`setu watch`) keeps it up to date.");
+    } else {
+        println!("Next: `setu join` (or `setu join --backup` for a copy that only receives).");
+    }
+    Ok(())
+}
+
+fn theirs_settled(d: &setu_core::hub::DeviceState, top: &str) -> bool {
+    d.digests.get(top).is_some_and(|g| g.settled)
+}
+
+fn devices(s: &Session) -> Result<(), Error> {
+    let rules = s.shared()?;
+    let conns = s.client.connections()?;
+    let now = setu_core::control::now_secs();
+    for d in s.hub.devices()? {
+        let me = d.id == s.ctx.me;
+        let link = if me {
+            "this computer".to_string()
+        } else if conns["connections"][&d.id]["connected"].as_bool() == Some(true) {
+            "connected".to_string()
+        } else {
+            "not connected".to_string()
+        };
+        let state = match (&d.held, &rules) {
+            (Some(h), _) => format!("needs you: revision {} waits ({})", h.revision, h.reasons.first().cloned().unwrap_or_default()),
+            (None, Some(r)) if d.applied_at > 0 && d.applied_revision >= r.revision => "up to date".to_string(),
+            (None, Some(r)) if r.devices.contains_key(&d.id) => format!("applying revision {}", r.revision),
+            _ => "not in the rules".to_string(),
+        };
+        let seen = if me { String::new() } else { format!("; last seen {} min ago", now.saturating_sub(d.updated_at) / 60) };
+        println!("  {} [{}] {}: {link}; {state}{seen}", d.name, short_id(&d.id), d.os.map(|o| format!("{o:?}")).unwrap_or_default());
+        for p in &d.problems {
+            println!("      problem: {p}");
+        }
+    }
+    Ok(())
+}
+
 /// Windows `canonicalize` returns `\\?\C:\...`; Syncthing and people expect `C:\...`.
 fn strip_verbatim(p: PathBuf) -> PathBuf {
     let s = p.to_string_lossy();
@@ -451,8 +594,13 @@ fn print_plan(plan: &Plan) {
 fn status(s: &Session) -> Result<(), Error> {
     println!("This computer: {} ({})", short_id(&s.ctx.me), s.local.root.display());
     println!("Control folder: {}", s.control.dir.display());
+    match s.hub.account() {
+        Some(a) => println!("Brahma account: {} on {}", a.email, a.server),
+        None => println!("Brahma account: not signed in"),
+    }
     let Some(rs) = s.shared()? else {
-        println!("No rules yet: run `setu create-rules`.");
+        let how = if s.hub.signed_in() { "`setu join`" } else { "`setu sign-in <server> <email>`, then `setu join`" };
+        println!("No rules yet: run {how}.");
         return Ok(());
     };
     let conns = s.client.connections()?;
@@ -465,7 +613,11 @@ fn status(s: &Session) -> Result<(), Error> {
         } else {
             "not connected".to_string()
         };
-        let applied = s.control.read_status(id).map(|st| format!("applied revision {}", st.applied_revision)).unwrap_or_else(|| "has not applied any rules".into());
+        let applied = match s.hub.device(id)? {
+            Some(st) if st.held.is_some() => format!("waiting for the person to check revision {}", st.held.map(|h| h.revision).unwrap_or(0)),
+            Some(st) if st.applied_at > 0 => format!("applied revision {}", st.applied_revision),
+            _ => "has not applied any rules".into(),
+        };
         println!("  {} [{}] {:?}: {link}; {applied}", d.name, short_id(id), d.os);
     }
     println!("Shared rules: revision {}", rs.revision);

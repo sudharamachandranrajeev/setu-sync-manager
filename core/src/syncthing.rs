@@ -149,6 +149,14 @@ impl Client {
         self.get(&format!("folder/errors?folder={}&perpage=200", enc(folder)))
     }
 
+    pub fn options(&self) -> Result<Value, Error> {
+        self.get("config/options")
+    }
+
+    pub fn patch_options(&self, patch: &Value) -> Result<(), Error> {
+        self.send("PATCH", "config/options", Some(patch))
+    }
+
     pub fn scan(&self, id: &str) -> Result<(), Error> {
         self.send("POST", &format!("db/scan?folder={}", enc(id)), None)
     }

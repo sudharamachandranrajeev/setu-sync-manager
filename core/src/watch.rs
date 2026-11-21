@@ -306,7 +306,14 @@ pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, clie
     let mut error_told: std::collections::BTreeMap<String, u64> = Default::default();
     // At start, treat the gate as open: a closed gate is told once, an open one not at all.
     let mut gate_known = false;
+    let mut ticker = crate::helper::Ticker::default();
     loop {
+        // The Brahma round: shared rules, pairing, applying, content check and tidy.
+        if ticker.due(dir) {
+            for n in ticker.run(dir) {
+                notify(&n);
+            }
+        }
         // A pause or resume in Setu takes effect at once, not at the next network check.
         if let Ok(cfg) = cfg_loader()
             && cfg.user_paused(now_secs()) != state.gate.user_paused

@@ -166,8 +166,8 @@
     {/if}
 
     <p class="next small">
-      <b>Next step:</b> open Setu on {there} and press <i>Start syncing</i> there too. Copying starts once both computers have
-      said yes.
+      <b>What happens next:</b> your other computers pick up these choices by themselves within a minute or two. If a
+      change would replace or remove many files on one of them, it waits there until you check it in Setu on that computer.
     </p>
   </div>
 
