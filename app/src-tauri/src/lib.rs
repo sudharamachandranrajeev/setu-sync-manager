@@ -1,6 +1,8 @@
 //! Setu's window: thin commands over `setu-core`. All rules, planning and applying live in the
 //! core, so the app and the `setu` command always agree.
 
+mod tray;
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -15,6 +17,7 @@ use setu_core::watch;
 use setu_core::local::{config_dir, LocalConfig};
 use setu_core::rules::{short_id, Kind, Mode, Os, RuleSet};
 use setu_core::session::Session;
+use setu_core::trust::{Conflict, FolderCheck, Kept, Restored};
 use setu_core::Error;
 
 #[derive(Default)]
@@ -87,6 +90,8 @@ struct View {
     root_mode: Option<String>,
     edits: Vec<EditView>,
     conflicts: Vec<String>,
+    /// Conflict copies of files in synced folders on this computer.
+    file_conflicts: usize,
     local_entries: usize,
     remote_entries: Option<usize>,
     remote_list_age: Option<u64>,
@@ -176,6 +181,7 @@ fn view(st: &mut AppState) -> View {
         root_mode: None,
         edits: Vec::new(),
         conflicts: Vec::new(),
+        file_conflicts: 0,
         local_entries: 0,
         remote_entries: None,
         remote_list_age: None,
@@ -244,6 +250,9 @@ fn view(st: &mut AppState) -> View {
         v.message = Some(e);
     }
     v.local_entries = st.local.as_ref().map(|t| t.entries.len()).unwrap_or(0);
+    if let (Some(s), Some(t)) = (st.session.as_ref(), st.local.as_ref()) {
+        v.file_conflicts = s.conflicts(t).map(|c| c.len()).unwrap_or(0);
+    }
     v.remote_entries = st.remote.as_ref().map(|t| t.entries.len());
     v.remote_list_age = st.remote_age;
     v
@@ -401,11 +410,57 @@ async fn resume(state: State<'_>, folder: String) -> Result<View, String> {
     Ok(view(&mut st))
 }
 
+#[tauri::command]
+async fn conflicts(state: State<'_>) -> Result<Vec<Conflict>, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    st.local = None;
+    ensure_trees(&mut st)?;
+    st.session.as_ref().unwrap().conflicts(st.local.as_ref().unwrap()).map_err(err)
+}
+
+#[tauri::command]
+async fn keep(state: State<'_>, copy: String, keep_copy: bool) -> Result<Vec<Conflict>, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    st.session.as_ref().unwrap().resolve(&copy, keep_copy).map_err(err)?;
+    st.local = None;
+    ensure_trees(&mut st)?;
+    st.session.as_ref().unwrap().conflicts(st.local.as_ref().unwrap()).map_err(err)
+}
+
+#[tauri::command]
+async fn versions(state: State<'_>) -> Result<Vec<Kept>, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    st.session.as_ref().unwrap().versions().map_err(err)
+}
+
+#[tauri::command]
+async fn restore(state: State<'_>, folder: String, path: String, version_time: String) -> Result<Restored, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    let r = st.session.as_ref().unwrap().restore(&folder, &path, &version_time).map_err(err)?;
+    st.local = None;
+    Ok(r)
+}
+
+#[tauri::command]
+async fn verify(state: State<'_>, rescan: bool) -> Result<Vec<FolderCheck>, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    st.session.as_ref().unwrap().verify(rescan).map_err(err)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(AppState::default()))
-        .invoke_handler(tauri::generate_handler![state, refresh, children, set_rule, discard, plan, apply, init, create_rules, set_allow, resume])
+        .setup(|app| {
+            tray::setup(app)?;
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![state, refresh, children, set_rule, discard, plan, apply, init, create_rules, set_allow, resume, conflicts, keep, versions, restore, verify])
         .run(tauri::generate_context!())
         .expect("error while running Setu");
 }

@@ -11,12 +11,14 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::apply::{self, Ctx, Plan, Report};
+use crate::compile;
 use crate::control::Control;
 use crate::index;
-use crate::local::{config_dir, write_atomic, LocalConfig};
+use crate::local::{config_dir, join_rel, write_atomic, LocalConfig};
 use crate::preview::{self, Preview};
 use crate::rules::{Device, Os, RuleSet};
 use crate::syncthing::Client;
+use crate::trust;
 use crate::Error;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -196,6 +198,58 @@ impl Session {
             p.guard.push("The other computer's file list has not arrived, so changes on that side cannot be shown. Open Setu there first, or confirm to go ahead without it.".into());
         }
         p
+    }
+
+    /// The rules both computers share (what is applied), as opposed to the local draft.
+    fn applied(&self) -> Result<RuleSet, Error> {
+        self.shared()?.ok_or_else(|| Error::Setup("no rules yet; run `setu create-rules` on one computer".into()))
+    }
+
+    fn folders(&self, rules: &RuleSet) -> Result<Vec<compile::FolderSpec>, Error> {
+        compile::compile(rules).map_err(|p| Error::Rules(format!("{} problem(s) in the rules", p.len())))
+    }
+
+    /// Conflict copies in synced folders, from a fresh scan of this computer.
+    pub fn conflicts(&self, here: &index::Tree) -> Result<Vec<trust::Conflict>, Error> {
+        Ok(trust::conflicts(&self.applied()?, here))
+    }
+
+    /// Settle a conflict; the copy not kept goes to `.stversions`.
+    pub fn resolve(&self, copy: &str, keep_copy: bool) -> Result<PathBuf, Error> {
+        trust::resolve(&self.local.root, &self.applied()?, copy, keep_copy)
+    }
+
+    /// Old versions kept in every Setu folder on this computer, newest first.
+    pub fn versions(&self) -> Result<Vec<trust::Kept>, Error> {
+        let rules = self.applied()?;
+        let mut out = Vec::new();
+        for f in self.folders(&rules)? {
+            let Ok(list) = trust::versions(&self.client, &f.id) else { continue };
+            out.extend(list.into_iter().map(|v| trust::Kept {
+                folder: f.id.clone(),
+                rel: if f.rel.is_empty() { v.path.clone() } else { format!("{}/{}", f.rel, v.path) },
+                version: v,
+            }));
+        }
+        out.sort_by(|a, b| b.version.version_time.cmp(&a.version.version_time).then_with(|| a.rel.cmp(&b.rel)));
+        Ok(out)
+    }
+
+    /// Put an old version back (in place, or beside the file in a receive-only folder).
+    pub fn restore(&self, folder: &str, path: &str, version_time: &str) -> Result<trust::Restored, Error> {
+        let rules = self.applied()?;
+        let f = self.folders(&rules)?.into_iter().find(|f| f.id == folder).ok_or_else(|| Error::Rules(format!("{folder} is not a Setu folder")))?;
+        let v = trust::versions(&self.client, folder)?
+            .into_iter()
+            .find(|v| v.path == path && v.version_time == version_time)
+            .ok_or_else(|| Error::Rules(format!("that version of {path} is no longer kept")))?;
+        let receive_only = compile::folder_type(&f.mode, &self.ctx.me) == "receiveonly";
+        trust::restore(&self.client, folder, &join_rel(&self.local.root, &f.rel), receive_only, &v)
+    }
+
+    /// Check every Setu folder here against Syncthing's records.
+    pub fn verify(&self, rescan: bool) -> Result<Vec<trust::FolderCheck>, Error> {
+        trust::verify(&self.client, &self.applied()?, &self.ctx.me, rescan)
     }
 
     pub fn other_device(&self, rules: &RuleSet) -> Option<String> {

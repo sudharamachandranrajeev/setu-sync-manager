@@ -47,6 +47,7 @@ export interface View {
   rootMode: string | null
   edits: EditView[]
   conflicts: string[]
+  fileConflicts: number
   localEntries: number
   remoteEntries: number | null
   remoteListAge: number | null
@@ -135,6 +136,40 @@ export interface Report {
   removed: number
 }
 
+export interface Conflict {
+  copy: string
+  original: string
+  copySize: number
+  copyMtime: number
+  originalSize: number | null
+  originalMtime: number | null
+}
+
+export interface Kept {
+  folder: string
+  rel: string
+  path: string
+  versionTime: string
+  modTime: string
+  size: number
+}
+
+export type Restored = 'inPlace' | { beside: string }
+
+export interface FolderCheck {
+  id: string
+  rel: string
+  folderType: string
+  state: string
+  needFiles: number
+  needBytes: number
+  otherCompletion: number | null
+  localChanges: number
+  errors: string[]
+  samples: string[]
+  ok: boolean
+}
+
 export const api = {
   state: () => invoke<View>('state'),
   refresh: () => invoke<View>('refresh'),
@@ -147,4 +182,9 @@ export const api = {
   setAllow: (what: 'metered' | 'relay', on: boolean) => invoke<View>('set_allow', { what, on }),
   resume: (folder: string) => invoke<View>('resume', { folder }),
   createRules: (otherOs: Os) => invoke<View>('create_rules', { otherOs }),
+  conflicts: () => invoke<Conflict[]>('conflicts'),
+  keep: (copy: string, keepCopy: boolean) => invoke<Conflict[]>('keep', { copy, keepCopy }),
+  versions: () => invoke<Kept[]>('versions'),
+  restore: (folder: string, path: string, versionTime: string) => invoke<Restored>('restore', { folder, path, versionTime }),
+  verify: (rescan: boolean) => invoke<FolderCheck[]>('verify', { rescan }),
 }

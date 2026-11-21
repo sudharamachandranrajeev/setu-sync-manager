@@ -13,6 +13,8 @@ use setu_core::session::Session;
 use setu_core::watch;
 use setu_core::Error;
 
+mod notify;
+
 const USAGE: &str = "\
 setu: choose what syncs between two computers, and which way.
 
@@ -33,6 +35,14 @@ setu: choose what syncs between two computers, and which way.
   setu watch                         Run the background helper (network gate, delete guard)
   setu allow metered|relay on|off    Let Setu's folders sync on a metered network or relay
   setu resume <folder-id>            Resume a folder the delete guard paused
+  setu conflicts                     List conflict copies in synced folders
+  setu keep <conflict-copy> copy|file
+                                     Settle a conflict: keep the copy or the current file.
+                                     The other one goes to .stversions, never deleted
+  setu versions [<path>]             Old versions kept (30 days), newest first
+  setu restore <folder-id> <path> <version-time>
+                                     Put an old version back
+  setu verify [--rescan]             Check every synced folder is complete and error-free
 ";
 
 fn main() -> ExitCode {
@@ -158,7 +168,10 @@ fn run(args: &[String]) -> Result<(), Error> {
             let cfg = LocalConfig::load(&dir)?;
             let client = setu_core::syncthing::Client::discover(cfg.syncthing_home.as_deref())?;
             println!("Setu is watching. Ctrl+C stops it.");
-            watch::run(&dir, || LocalConfig::load(&config_dir()), &client)
+            watch::run(&dir, || LocalConfig::load(&config_dir()), &client, &|n| {
+                println!("{}: {}", n.title, n.body);
+                notify::show(n);
+            })
         }
         "allow" => {
             let dir = config_dir();
@@ -182,6 +195,87 @@ fn run(args: &[String]) -> Result<(), Error> {
             let id = args.get(1).ok_or_else(|| Error::Setup("usage: setu resume <folder-id>".into()))?;
             watch::release_hold(&s.dir, &s.client, id)?;
             println!("Resumed {id}.");
+            Ok(())
+        }
+        "conflicts" => {
+            let s = Session::open()?;
+            let here = Tree::new(setu_core::index::scan(&s.local.root, &s.working()?.always_ignore)?);
+            let cs = s.conflicts(&here)?;
+            if cs.is_empty() {
+                println!("No conflict copies.");
+            }
+            for c in &cs {
+                let file = match c.original_size {
+                    Some(n) => format!("file {}", size(n)),
+                    None => "file is gone".into(),
+                };
+                println!("{}\n    copy {}, {file}", c.copy, size(c.copy_size));
+            }
+            Ok(())
+        }
+        "keep" => {
+            let s = Session::open()?;
+            let usage = || Error::Setup("usage: setu keep <conflict-copy> copy|file".into());
+            let copy = args.get(1).ok_or_else(usage)?;
+            let keep_copy = match args.get(2).map(String::as_str) {
+                Some("copy") => true,
+                Some("file") => false,
+                _ => return Err(usage()),
+            };
+            let moved = s.resolve(copy, keep_copy)?;
+            println!("Done. Kept the {}; the other one is in {}.", if keep_copy { "copy" } else { "file" }, moved.display());
+            Ok(())
+        }
+        "versions" => {
+            let s = Session::open()?;
+            let only = args.get(1);
+            let list = s.versions()?;
+            let list: Vec<_> = list.iter().filter(|k| only.is_none_or(|p| k.rel == *p || k.rel.starts_with(&format!("{p}/")))).collect();
+            if list.is_empty() {
+                println!("No old versions kept.");
+            }
+            for k in list {
+                println!("{}  {}  {}  {} {}", k.version.version_time, size(k.version.size), k.rel, k.folder, k.version.path);
+            }
+            Ok(())
+        }
+        "restore" => {
+            let s = Session::open()?;
+            let [_, folder, path, time] = args else {
+                return Err(Error::Setup("usage: setu restore <folder-id> <path> <version-time> (copy them from `setu versions`)".into()));
+            };
+            match s.restore(folder, path, time)? {
+                setu_core::trust::Restored::InPlace => println!("Restored {path}. The file it replaced is kept in .stversions."),
+                setu_core::trust::Restored::Beside(rel) => println!("This computer only receives this folder, so the old version is saved beside it: {rel}"),
+            }
+            Ok(())
+        }
+        "verify" => {
+            let checks = Session::open()?.verify(args.iter().any(|a| a == "--rescan"))?;
+            if checks.is_empty() {
+                println!("No folders sync yet.");
+                return Ok(());
+            }
+            let mut bad = 0;
+            for c in &checks {
+                let other = c.other_completion.map(|p| format!(", other computer {p:.0} %")).unwrap_or_default();
+                let mark = if c.ok { "ok  " } else { bad += 1; "NOT " };
+                let name = if c.rel.is_empty() { "(whole folder)" } else { &c.rel };
+                println!("{mark} {name}  [{} {}]  needs {} files ({}){other}", c.folder_type, c.state, c.need_files, size(c.need_bytes));
+                if c.local_changes > 0 {
+                    println!("       {} files changed here are not sent back (this side only receives)", c.local_changes);
+                }
+                for e in c.errors.iter().take(10) {
+                    println!("       error: {e}");
+                }
+                for p in c.samples.iter().take(10) {
+                    println!("       waiting: {p}");
+                }
+            }
+            if bad > 0 {
+                return Err(Error::Syncthing(format!("{bad} folder(s) not complete")));
+            }
+            println!("All {} folder(s) complete here.", checks.len());
             Ok(())
         }
         _ => {

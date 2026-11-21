@@ -12,3 +12,4 @@ path = "src/main.rs"
 [dependencies]
 serde_json = "1"
 setu-core = { path = "../core" }
+notify-rust = "4.18"

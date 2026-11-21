@@ -85,7 +85,7 @@ impl Client {
 
     /// Events after `since`, waiting up to `timeout` seconds for new ones.
     pub fn events(&self, since: u64, timeout: u64) -> Result<Vec<Value>, Error> {
-        self.get(&format!("events?since={since}&timeout={timeout}&events=ItemFinished"))
+        self.get(&format!("events?since={since}&timeout={timeout}&events=ItemFinished,LocalIndexUpdated,FolderErrors"))
     }
 
     pub fn default_folder(&self) -> Result<Value, Error> {
@@ -127,6 +127,26 @@ impl Client {
 
     pub fn completion(&self, folder: &str, device: &str) -> Result<Value, Error> {
         self.get(&format!("db/completion?folder={}&device={}", enc(folder), enc(device)))
+    }
+
+    /// Old versions kept by the folder's versioning: path → list of versions.
+    pub fn versions(&self, folder: &str) -> Result<Value, Error> {
+        self.get(&format!("folder/versions?folder={}", enc(folder)))
+    }
+
+    /// Files this computer still needs from the other one.
+    pub fn need(&self, folder: &str) -> Result<Value, Error> {
+        self.get(&format!("db/need?folder={}&perpage=200", enc(folder)))
+    }
+
+    /// Files changed here in a receive-only folder (not sent back).
+    pub fn local_changed(&self, folder: &str) -> Result<Value, Error> {
+        self.get(&format!("db/localchanged?folder={}&perpage=200", enc(folder)))
+    }
+
+    /// Files that failed to sync, with the reason.
+    pub fn folder_errors(&self, folder: &str) -> Result<Value, Error> {
+        self.get(&format!("folder/errors?folder={}&perpage=200", enc(folder)))
     }
 
     pub fn scan(&self, id: &str) -> Result<(), Error> {

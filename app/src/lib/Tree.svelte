@@ -200,7 +200,8 @@
   }
   .only {
     flex: 0 100 auto;
-    min-width: 0;
+    /* Wide enough for "only here"; longer ones shorten with an ellipsis. */
+    min-width: 72px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

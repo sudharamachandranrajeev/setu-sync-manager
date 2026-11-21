@@ -11,6 +11,7 @@ pub mod preview;
 pub mod rules;
 pub mod session;
 pub mod syncthing;
+pub mod trust;
 pub mod watch;
 
 #[derive(Debug, thiserror::Error)]

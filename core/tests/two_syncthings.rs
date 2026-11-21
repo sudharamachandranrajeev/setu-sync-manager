@@ -249,7 +249,7 @@ fn two_computers_sync_by_the_rules() {
         std::thread::spawn(move || {
             let c = Client::discover(Some(&bhome)).unwrap();
             let cfg = move || Ok(setu_core::local::LocalConfig { root: root.clone(), allow_metered: true, allow_relay: true, ..Default::default() });
-            let _ = setu_core::watch::run(&wdir, cfg, &c);
+            let _ = setu_core::watch::run(&wdir, cfg, &c, &|n| eprintln!("notice: {} {}", n.title, n.body));
         });
     }
     assert!(wait_for(30, || (setu_core::watch::read_state(&wdir).alive_at > 0).then_some(())).is_some(), "watcher never started");
@@ -259,8 +259,11 @@ fn two_computers_sync_by_the_rules() {
     assert_eq!(held.folder, setu_core::compile::folder_id("shared"));
     let paused = b.client.folders().unwrap().iter().any(|f| f["id"] == held.folder.as_str() && f["paused"] == true);
     assert!(paused, "held folder must be paused on B");
-    let left = (0..70).filter(|i| read(&rb, &format!("shared/many/{i}.txt")).is_some()).count();
-    assert!(left > 0, "the guard should stop deletions before all 70 are gone");
+    // Deletions already under way finish; every deleted file is kept in .stversions.
+    let kept = (0..70)
+        .filter(|i| read(&rb, &format!("shared/many/{i}.txt")).is_some() || std::fs::read_dir(rb.join("shared/.stversions/many")).is_ok_and(|d| d.filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().starts_with(&format!("{i}~")))))
+        .count();
+    assert_eq!(kept, 70, "every deleted file must be recoverable");
     setu_core::watch::release_hold(&wdir, &b.client, &held.folder).unwrap();
     assert!(b.client.folders().unwrap().iter().any(|f| f["id"] == held.folder.as_str() && f["paused"] == false));
 
@@ -275,4 +278,48 @@ fn two_computers_sync_by_the_rules() {
     for (root, rel) in [(&ra, "both/x.txt"), (&rb, "both/x.txt"), (&ra, "both/y.txt"), (&rb, "both/y.txt")] {
         assert!(read(root, rel).is_some(), "{rel} must stay in {}", root.display());
     }
+
+    // Trust: Verify agrees on both sides once things settle.
+    for (st, me) in [(&a, &a.id), (&b, &b.id)] {
+        let ok = wait_for(90, || {
+            let checks = setu_core::trust::verify(&st.client, &rs, me, false).ok()?;
+            checks.iter().all(|c| c.ok).then_some(checks)
+        });
+        assert!(ok.is_some(), "verify never came out clean: {:?}", setu_core::trust::verify(&st.client, &rs, me, false));
+    }
+    // Conflicts: B has a conflict copy of shared/pre.txt; keep B's current file, shelve the copy.
+    let tb = setu_core::index::Tree::new(setu_core::index::scan(&rb, &[]).unwrap());
+    let cs = setu_core::trust::conflicts(&rs, &tb);
+    let c = cs.iter().find(|c| c.original == "shared/pre.txt").expect("conflict listed");
+    let shelved = setu_core::trust::resolve(&rb, &rs, &c.copy, false).unwrap();
+    assert!(shelved.starts_with(rb.join("shared/.stversions")));
+    assert_eq!(read(&rb, "shared/pre.txt").as_deref(), Some("A version"));
+    // Versions, one way: B keeps A's old copy; restoring saves it beside the file on B.
+    let fid = setu_core::compile::folder_id("shared");
+    put(&ra, "shared/v.txt", "one");
+    let _ = a.client.scan(&fid);
+    assert!(wait_for(60, || (read(&rb, "shared/v.txt")? == "one").then_some(())).is_some());
+    std::thread::sleep(Duration::from_secs(2));
+    put(&ra, "shared/v.txt", "two!");
+    let _ = a.client.scan(&fid);
+    assert!(wait_for(60, || (read(&rb, "shared/v.txt")? == "two!").then_some(())).is_some());
+    let v = wait_for(30, || setu_core::trust::versions(&b.client, &fid).ok()?.into_iter().find(|v| v.path == "v.txt")).expect("old version kept");
+    let r = setu_core::trust::restore(&b.client, &fid, &rb.join("shared"), true, &v).unwrap();
+    let setu_core::trust::Restored::Beside(rel) = r else { panic!("receive-only must restore beside") };
+    assert_eq!(read(&rb.join("shared"), &rel).as_deref(), Some("one"));
+    assert_eq!(read(&rb, "shared/v.txt").as_deref(), Some("two!"));
+
+    // Versions, both ways: restoring in place on B puts the old copy back on both computers.
+    let wid = setu_core::compile::folder_id("we[ird]");
+    put(&ra, "we[ird]/r.txt", "first");
+    let _ = a.client.scan(&wid);
+    assert!(wait_for(60, || (read(&rb, "we[ird]/r.txt")? == "first").then_some(())).is_some());
+    std::thread::sleep(Duration::from_secs(2));
+    put(&ra, "we[ird]/r.txt", "second");
+    let _ = a.client.scan(&wid);
+    assert!(wait_for(60, || (read(&rb, "we[ird]/r.txt")? == "second").then_some(())).is_some());
+    let v = wait_for(30, || setu_core::trust::versions(&b.client, &wid).ok()?.into_iter().find(|v| v.path == "r.txt")).expect("old version kept");
+    assert!(wait_for(60, || (b.client.folder_status(&wid).ok()?["state"] == "idle").then_some(())).is_some());
+    assert_eq!(setu_core::trust::restore(&b.client, &wid, &rb.join("we[ird]"), false, &v).unwrap(), setu_core::trust::Restored::InPlace);
+    assert!(wait_for(60, || (read(&ra, "we[ird]/r.txt")? == "first" && read(&rb, "we[ird]/r.txt")? == "first").then_some(())).is_some(), "restore in place must reach both");
 }

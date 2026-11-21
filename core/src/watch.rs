@@ -244,20 +244,64 @@ pub fn on_event(ev: &Value, counter: &mut DeleteCounter, t: u64) -> Option<(Stri
     (n > DELETE_LIMIT).then(|| (folder.to_string(), n))
 }
 
-/// Run forever: gate every minute, deletions as they happen.
-pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, client: &Client) -> Result<(), Error> {
+/// Conflict copies an event reports in a Setu folder: received from the other computer
+/// (`ItemFinished`) or made here by Syncthing and picked up by a scan (`LocalIndexUpdated`).
+pub fn conflict_names(ev: &Value) -> Vec<String> {
+    let d = &ev["data"];
+    if !d["folder"].as_str().is_some_and(|f| f.starts_with(FOLDER_PREFIX)) {
+        return Vec::new();
+    }
+    let names: Vec<&str> = match ev["type"].as_str() {
+        Some("ItemFinished") if d["action"] == "update" && d["error"].is_null() => d["item"].as_str().into_iter().collect(),
+        Some("LocalIndexUpdated") => d["filenames"].as_array().into_iter().flatten().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    let mut out: Vec<String> = names.into_iter().filter(|n| crate::trust::original_of(n).is_some()).map(String::from).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Something worth a desktop notification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub title: String,
+    pub body: String,
+}
+
+fn notice(title: &str, body: String) -> Notice {
+    Notice { title: title.into(), body }
+}
+
+/// Folder errors are repeated by Syncthing on every pull; tell once an hour per folder.
+const ERROR_NOTICE_EVERY: u64 = 3600;
+
+/// Run forever: gate every minute, deletions as they happen. `notify` shows a notice to the
+/// person at this computer (the helper uses desktop notifications).
+pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, client: &Client, notify: &dyn Fn(&Notice)) -> Result<(), Error> {
     let me = client.my_id()?;
     let mut state = read_state(dir);
     let mut counter = DeleteCounter::default();
     let mut since: u64 = client.events(0, 1)?.iter().filter_map(|e| e["id"].as_u64()).max().unwrap_or(0);
     let mut next_gate = Instant::now();
+    let mut error_told: std::collections::BTreeMap<String, u64> = Default::default();
+    // At start, treat the gate as open: a closed gate is told once, an open one not at all.
+    let mut gate_known = false;
     loop {
         if Instant::now() >= next_gate {
             if let Ok(cfg) = cfg_loader() {
+                let was_open = if gate_known { state.gate.open } else { true };
                 let gate = check_gate(&cfg, client, &me);
-                if let Err(e) = apply_gate(&mut state, gate, client) {
-                    eprintln!("setu watch: gate: {e}");
+                match apply_gate(&mut state, gate, client) {
+                    Ok(()) if was_open && !state.gate.open => notify(&notice(
+                        "Setu: syncing on hold",
+                        format!("{}. It resumes on its own when the network is fine.", state.gate.reason.as_deref().unwrap_or("network")),
+                    )),
+                    Ok(()) if !was_open && state.gate.open => notify(&notice("Setu: syncing again", "The network is fine again.".into())),
+                    Ok(()) => {}
+                    Err(e) => eprintln!("setu watch: gate: {e}"),
                 }
+                gate_known = true;
             }
             next_gate = Instant::now() + GATE_EVERY;
             state.alive_at = now_secs();
@@ -268,6 +312,7 @@ pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, clie
         state.holds.retain(|h| on_disk.holds.contains(h));
         match client.events(since, 20) {
             Ok(evs) => {
+                let mut conflicts = Vec::new();
                 for ev in &evs {
                     since = since.max(ev["id"].as_u64().unwrap_or(since));
                     if let Some((folder, n)) = on_event(ev, &mut counter, now_secs())
@@ -277,7 +322,33 @@ pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, clie
                         eprintln!("setu watch: {n} deletions in {folder} within {DELETE_WINDOW} s; paused it");
                         state.holds.push(Hold { folder: folder.clone(), deletes: n, at: now_secs() });
                         counter.reset(&folder);
+                        notify(&notice(
+                            "Setu paused a folder",
+                            format!("{n} files were deleted on the other computer within two minutes. Open Setu to check, then resume. Deleted files are kept for 30 days."),
+                        ));
                     }
+                    conflicts.extend(conflict_names(ev));
+                    if ev["type"] == "FolderErrors"
+                        && let Some(folder) = ev["data"]["folder"].as_str().filter(|f| f.starts_with(FOLDER_PREFIX))
+                    {
+                        let n = ev["data"]["errors"].as_array().map_or(0, Vec::len);
+                        let last = error_told.get(folder).copied().unwrap_or(0);
+                        if n > 0 && now_secs() >= last + ERROR_NOTICE_EVERY {
+                            error_told.insert(folder.to_string(), now_secs());
+                            let first = ev["data"]["errors"][0]["path"].as_str().unwrap_or("?");
+                            notify(&notice("Setu: files could not sync", format!("{n} file(s), for example {first}. Open Setu → Check for the reasons.")));
+                        }
+                    }
+                }
+                conflicts.sort();
+                conflicts.dedup();
+                match conflicts.as_slice() {
+                    [] => {}
+                    [one] => notify(&notice(
+                        "Setu: a file changed on both computers",
+                        format!("Both copies are kept: {one}. Open Setu → Conflicts to choose."),
+                    )),
+                    many => notify(&notice("Setu: files changed on both computers", format!("{} conflict copies. Open Setu → Conflicts to choose.", many.len()))),
                 }
             }
             Err(e) => {
@@ -311,6 +382,17 @@ mod tests {
         for i in 0..(DELETE_LIMIT * 3) {
             assert_eq!(on_event(&del(f), &mut c, i as u64 * 10), None);
         }
+    }
+
+    #[test]
+    fn spots_conflict_copies_in_events() {
+        let c = "a/f.sync-conflict-20261120-235545-AAAAAAA.txt";
+        let got = conflict_names(&json!({ "type": "LocalIndexUpdated", "data": { "folder": "setu-f-1", "filenames": ["a/f.txt", c] } }));
+        assert_eq!(got, vec![c.to_string()]);
+        let got = conflict_names(&json!({ "type": "ItemFinished", "data": { "folder": "setu-f-1", "item": c, "action": "update", "error": null } }));
+        assert_eq!(got, vec![c.to_string()]);
+        assert!(conflict_names(&json!({ "type": "ItemFinished", "data": { "folder": "setu-f-1", "item": c, "action": "delete", "error": null } })).is_empty());
+        assert!(conflict_names(&json!({ "type": "LocalIndexUpdated", "data": { "folder": "claude-memory", "filenames": [c] } })).is_empty());
     }
 
     #[test]

@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { listen } from '@tauri-apps/api/event'
   import { api, type NodeView, type Os, type PlanView, type Report, type View } from './lib/api'
   import DirPicker from './lib/DirPicker.svelte'
   import FirstSync from './lib/FirstSync.svelte'
   import PlanSheet from './lib/PlanSheet.svelte'
+  import TrustSheet, { type TrustTab } from './lib/TrustSheet.svelte'
   import Tree, { type Row } from './lib/Tree.svelte'
   import { ago, bytes, dirOf, modeOf, sentence, shortLabel, type Dir } from './lib/format'
 
@@ -17,6 +19,7 @@
   let rootInput = $state('')
   let otherOs = $state<Os>('windows')
   let guide = $state(false)
+  let trust = $state<TrustTab | null>(null)
 
   const me = $derived(view?.me ?? null)
   const other = $derived(view?.other ?? null)
@@ -59,6 +62,15 @@
 
   onMount(() => {
     api.state().then(boot).catch(fail)
+    // The tray menu opens a sheet directly.
+    const off = listen<TrustTab>('open-trust', (e) => {
+      plan = null
+      guide = false
+      trust = e.payload
+    })
+    return () => {
+      off.then((f) => f())
+    }
   })
 
   async function toggle(n: NodeView) {
@@ -182,8 +194,19 @@
     }
   }
 
+  async function changed(message: string) {
+    say(message)
+    try {
+      view = await api.refresh()
+      await reloadOpen()
+    } catch (e) {
+      fail(e)
+    }
+  }
+
   function onkey(e: KeyboardEvent) {
-    if (e.key === 'Escape' && plan) plan = null
+    if (e.key === 'Escape' && trust) trust = null
+    else if (e.key === 'Escape' && plan) plan = null
     else if ((e.key === 'F5' || (e.ctrlKey && e.key === 'r')) && !plan) {
       e.preventDefault()
       refresh()
@@ -224,7 +247,14 @@
     {/if}
     <div class="grow"></div>
     {#if view?.stage === 'ready'}
-      <button class="btn" onclick={() => (guide = true)} title="Go through the top folders one at a time">First-sync guide</button>
+      {#if view.fileConflicts}
+        <button class="btn conflicts" onclick={() => (trust = 'conflicts')} title="Files changed on both computers">
+          {view.fileConflicts} conflict{view.fileConflicts === 1 ? '' : 's'}
+        </button>
+      {/if}
+      <button class="btn" onclick={() => (trust = 'versions')} title="Old versions: put back a replaced or deleted file">Versions</button>
+      <button class="btn" onclick={() => (trust = 'check')} title="Check every synced folder is complete">Check</button>
+      <button class="btn" onclick={() => (guide = true)} title="First-sync guide: go through the top folders one at a time">Guide</button>
       <button class="btn" onclick={refresh} title="Read the folders again (F5)">Refresh</button>
     {/if}
   </header>
@@ -387,9 +417,18 @@
   {#if plan && me && other}
     <PlanSheet view={plan} {me} {other} {busy} onclose={() => (plan = null)} onapply={apply} />
   {/if}
+  {#if trust && me && other}
+    <TrustSheet bind:tab={trust} {me} {other} onclose={() => (trust = null)} onchanged={changed} />
+  {/if}
 </div>
 
 <style>
+  .btn.conflicts {
+    background: var(--warn-bg);
+    color: var(--warn);
+    border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+    font-weight: 600;
+  }
   .shell {
     display: flex;
     flex-direction: column;
@@ -559,6 +598,23 @@
     min-height: 0;
     display: grid;
     grid-template-columns: minmax(0, 1fr) 340px;
+  }
+  .top .btn {
+    white-space: nowrap;
+  }
+  @media (max-width: 1000px) {
+    .revs {
+      display: none;
+    }
+  }
+  @media (max-width: 760px) {
+    .link .dev:first-child,
+    .brand .word {
+      display: none;
+    }
+    .top {
+      gap: 10px;
+    }
   }
   @media (max-width: 900px) {
     .main {

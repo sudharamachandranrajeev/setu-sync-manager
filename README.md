@@ -47,6 +47,21 @@ does that, and Setu tells Syncthing what to do. It works with two computers at a
 - ↩️ **Nothing lost by changing your mind** – switching a folder off stops syncing it; the files
   stay on both computers.
 - 🧱 **Starts with everything Off** – nothing moves until you choose it.
+- 🔍 **File-by-file preview** – before the first sync, Setu compares both computers' file lists
+  and shows how many files go each way, which ones get replaced, and which stay on one side.
+  If many files would be replaced, it asks a second time.
+- 🪟 **Windows name check** – names Windows cannot hold (`CON`, `a:b`, trailing dots, very long
+  paths, two names that differ only in case) are listed before anything copies.
+- 🛑 **Delete guard** – if more than 50 files are deleted on the other computer within two
+  minutes, Setu pauses that folder here and tells you, until you resume it.
+- 📶 **Network gate** – syncing waits on a metered connection or a slow relayed link, unless you
+  allow it.
+- ⚖️ **Conflicts, side by side** – when a file changed on both computers, both copies are kept;
+  pick the one you want, and the other is put away, not deleted.
+- 🕰️ **Old versions for 30 days** – put back any replaced or deleted file from a list.
+- ✅ **Check** – one click confirms every synced folder is complete and error-free.
+- 🔔 **Notifications and tray** – a desktop notice when a folder is paused, a conflict appears or
+  files cannot sync.
 
 ## 🚀 Get started
 
@@ -105,6 +120,13 @@ account.
 The change stays on that computer and is not sent back. Syncthing marks the folder as having
 local changes. The sending computer's version wins again if you revert those changes in
 Syncthing.
+</details>
+
+<details>
+<summary><b>Where do replaced and deleted files go?</b></summary>
+
+Into a hidden `.stversions` folder inside each synced folder, kept for 30 days. Open
+**Versions** in Setu to put one back. A conflict copy you do not keep goes there too.
 </details>
 
 <details>
