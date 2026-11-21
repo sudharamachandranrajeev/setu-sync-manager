@@ -48,6 +48,11 @@
   const sent = (n: NodeView) => (choice === 'in' ? n.there : choice === 'out' ? n.here : n.here && n.there ? (n.here.size >= n.there.size ? n.here : n.there) : (n.here ?? n.there))
   const total = $derived(order.filter((f) => include[f.path]).reduce((s, f) => s + (sent(f)?.size ?? 0), 0))
   const leftOut = $derived(order.filter((f) => !include[f.path]).length)
+  const picked = $derived(order.length - leftOut)
+
+  function setAll(on: boolean) {
+    for (const f of order) include[f.path] = on
+  }
 
   const choices: { d: Dir; title: string; body: string }[] = $derived([
     { d: 'in', title: `Copy everything from ${there} to this computer`, body: `${there} is the main copy. Edits you make here are not sent back.` },
@@ -107,10 +112,24 @@
       <h2 id="fs-title">Leave anything out?</h2>
     </header>
     <div class="body">
-      <p class="small">Untick folders you don't want copied, such as big projects. Biggest are at the top.</p>
+      <p class="small">Tick the folders to copy and untick the ones to leave out, such as big projects. Biggest are at the top.</p>
       {#if !remoteKnown}
         <p class="note small">{there}'s file list has not arrived yet, so sizes show this computer only. Open Setu on {there} once to fix this.</p>
       {/if}
+      <div class="allrow">
+        <label>
+          <input
+            type="checkbox"
+            checked={picked === order.length && order.length > 0}
+            indeterminate={picked > 0 && picked < order.length}
+            onchange={(e) => setAll((e.currentTarget as HTMLInputElement).checked)}
+          />
+          <b>{picked} of {order.length} folders selected</b>
+        </label>
+        <div class="grow"></div>
+        <button class="link-btn" disabled={picked === order.length} onclick={() => setAll(true)}>Select all</button>
+        <button class="link-btn" disabled={picked === 0} onclick={() => setAll(false)}>Select none</button>
+      </div>
       <ul class="pick">
         {#each order as f (f.path)}
           {@const s = sent(f)}
@@ -118,12 +137,15 @@
             <label>
               <input type="checkbox" bind:checked={include[f.path]} />
               <span class="fname">{f.name}</span>
-              {#if size(f) >= BIG}<span class="big">large</span>{/if}
-              <span class="fsize muted small">{s ? `${bytes(s.size)} · ${s.files.toLocaleString()} files` : 'empty'}</span>
+              {#if (s?.size ?? 0) >= BIG}<span class="big">large</span>{/if}
+              <span class="fsize muted small">{s ? `${bytes(s.size)} · ${s.files.toLocaleString()} files` : choice === 'in' ? `not on ${there}` : choice === 'out' ? 'not on this computer' : 'empty'}</span>
             </label>
           </li>
         {/each}
       </ul>
+      {#if picked === 0}
+        <p class="note small">No folders selected. Only loose files at the top level will sync. Tick the folders you want copied.</p>
+      {/if}
       <p class="sum small">
         <b>About {bytes(total)}</b> to look at{leftOut ? `, ${leftOut} folder${leftOut === 1 ? '' : 's'} left out` : ''}. Files that are already the same are not copied again.
       </p>
@@ -241,6 +263,31 @@
   }
   .choice.plain {
     background: var(--surface-2);
+  }
+  .allrow {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 8px;
+    padding: 0 12px;
+  }
+  .allrow label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+  }
+  .link-btn {
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 12.5px;
+    padding: 0;
+  }
+  .link-btn:hover:not(:disabled) {
+    text-decoration: underline;
+  }
+  .link-btn:disabled {
+    color: var(--faint);
   }
   .pick {
     list-style: none;
