@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Setu
+GenericName=Sync manager
+Comment=Choose what syncs between two computers, and which way
+Exec=setu-app
+Icon=setu
+Terminal=false
+Categories=Utility;FileTools;
+Keywords=sync;syncthing;backup;

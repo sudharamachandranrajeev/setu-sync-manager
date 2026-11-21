@@ -1,0 +1,12 @@
+[Unit]
+Description=Setu background helper: network gate, delete guard and notifications
+Documentation=https://github.com/sudharamachandranrajeev/setu-sync-manager
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/setu-watch
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

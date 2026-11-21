@@ -68,8 +68,16 @@ does that, and Setu tells Syncthing what to do. It works with two computers at a
 You need [Syncthing](https://syncthing.net/downloads/) running on both computers, and the two
 computers paired in Syncthing (each one added as a device on the other).
 
-1. **Install Setu on both computers.** There is no download yet: build it from source (see
-   [For developers](#-for-developers)). Downloads come with the first release.
+1. **Install Setu on both computers.** Download it from the
+   [Releases page](https://github.com/sudharamachandranrajeev/setu-sync-manager/releases):
+   - **Windows:** run `Setu-…-windows-x64-setup.exe`. It is not code-signed yet, so Windows
+     SmartScreen may warn: choose **More info**, then **Run anyway**.
+   - **Linux:** unpack `setu-…-linux-x64.tar.gz`, open a terminal in that folder and run
+     `./install.sh`. It installs for you only (no `sudo`) and adds Setu to the app menu.
+
+   Both start Setu's small background helper at sign-in. It pauses syncing on a metered
+   network, stops mass deletions and shows notifications. To leave it out, untick it in the
+   Windows installer, or run `./install.sh --no-helper` on Linux.
 2. **Pair Setu's control folder.** In Syncthing on both computers, add a folder with the folder
    ID `setu-control`, shared with the other computer. Setu keeps its rules and status there.
    Any empty folder path works.
@@ -143,8 +151,9 @@ that does everything the window does.
 | Folder | What is in it |
 | --- | --- |
 | `core/` | Rules, the compiler that turns rules into Syncthing folders and ignore lists, planning and applying |
-| `cli/` | The `setu` command |
+| `cli/` | The `setu` command and `setu-watch`, the background helper |
 | `app/` | The window: Svelte front end in `src/`, Tauri back end in `src-tauri/` |
+| `packaging/` | The Linux download (`linux/package.sh`) and the Windows installer (`windows/setu.iss`, Inno Setup) |
 
 ```sh
 cargo test -p setu-core                         # fast tests
@@ -155,6 +164,9 @@ cd app && npm ci && npx tauri build --no-bundle # the window
 
 The two-Syncthing test starts its own Syncthing instances with temporary folders and ports.
 It never touches the Syncthing you use.
+
+A tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds both downloads and
+publishes a GitHub release.
 
 ## Licence
 
