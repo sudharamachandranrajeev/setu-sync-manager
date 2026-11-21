@@ -52,7 +52,15 @@ export interface View {
   remoteEntries: number | null
   remoteListAge: number | null
   alwaysIgnore: string[]
+  leaveOut: LeaveOutEdits
+  /** Paused here by the person: until this Unix time, or 0 until resumed. */
+  pausedUntil: number | null
   watch: WatchView | null
+}
+
+export interface LeaveOutEdits {
+  added: string[]
+  removed: string[]
 }
 
 export interface Side {
@@ -128,6 +136,7 @@ export interface PlanView {
   plan: Plan
   preview: Preview
   edits: EditView[]
+  leaveOut: LeaveOutEdits
 }
 
 export interface Report {
@@ -175,6 +184,8 @@ export const api = {
   refresh: () => invoke<View>('refresh'),
   children: (path: string) => invoke<NodeView[]>('children', { path }),
   setRule: (path: string, dir: boolean, mode: string | null) => invoke<View>('set_rule', { path, dir, mode }),
+  setLeaveOut: (list: string[]) => invoke<View>('set_leave_out', { list }),
+  setPause: (until: number | null) => invoke<View>('set_pause', { until }),
   discard: () => invoke<View>('discard'),
   plan: () => invoke<PlanView>('plan'),
   apply: (guardConfirmed: boolean) => invoke<Report>('apply', { guardConfirmed }),

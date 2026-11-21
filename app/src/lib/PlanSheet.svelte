@@ -29,7 +29,9 @@
     return d === 'out' ? `this computer → ${there}` : d === 'in' ? `${there} → this computer` : d === 'both' ? 'both ways' : shortLabel(d, there)
   }
   const blocked = $derived(plan.problems.length > 0)
-  const nothing = $derived(plan.actions.length === 0 && view.edits.length === 0)
+  const lo = $derived(view.leaveOut)
+  const nothing = $derived(plan.actions.length === 0 && view.edits.length === 0 && lo.added.length + lo.removed.length === 0)
+  const shown = (l: string) => l.replace(/^(\(\?[di]\))+/, '')
   const typeLabel = (t: string) => ({ sendonly: 'sends only', receiveonly: 'receives only', sendreceive: 'both ways' })[t] ?? t
   const where = (p: string) => p || 'Everything (top level)'
   const files = (n: number) => `${n.toLocaleString()} file${n === 1 ? '' : 's'}`
@@ -49,6 +51,16 @@
         {#each plan.problems as p, i (i)}
           <p><b>{where(p.path)}</b>: {p.message}</p>
         {/each}
+      </section>
+    {/if}
+
+    {#if lo.added.length || lo.removed.length}
+      <section>
+        <h3>Always left out</h3>
+        <ul class="edits">
+          {#each lo.added as l (l)}<li><span class="tag remove">Leave out</span><span class="mono path">{shown(l)}</span><span class="muted small">not copied any more; copies already made stay</span></li>{/each}
+          {#each lo.removed as l (l)}<li><span class="tag add">Copy again</span><span class="mono path">{shown(l)}</span><span class="muted small">copied like everything else around it</span></li>{/each}
+        </ul>
       </section>
     {/if}
 

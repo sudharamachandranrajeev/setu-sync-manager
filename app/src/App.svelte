@@ -4,6 +4,7 @@
   import { api, type FolderCheck, type NodeView, type Os, type PlanView, type Report, type View } from './lib/api'
   import DirPicker from './lib/DirPicker.svelte'
   import FirstSync from './lib/FirstSync.svelte'
+  import LeaveOut from './lib/LeaveOut.svelte'
   import PlanSheet from './lib/PlanSheet.svelte'
   import TrustSheet, { type TrustTab } from './lib/TrustSheet.svelte'
   import Tree, { type Row } from './lib/Tree.svelte'
@@ -21,6 +22,7 @@
   let guide = $state(false)
   let trust = $state<TrustTab | null>(null)
   let checks = $state<FolderCheck[] | null>(null)
+  let pauseMenu = $state(false)
 
   const me = $derived(view?.me ?? null)
   const other = $derived(view?.other ?? null)
@@ -215,6 +217,51 @@
     }
   }
 
+  /** Changes not saved yet: choices plus the "always left out" list. */
+  const changes = $derived(view ? view.edits.length + view.leaveOut.added.length + view.leaveOut.removed.length : 0)
+
+  async function setLeaveOut(list: string[]): Promise<boolean> {
+    try {
+      view = await api.setLeaveOut(list)
+      await reloadOpen()
+      return true
+    } catch (e) {
+      fail(e)
+      return false
+    }
+  }
+
+  /** Pause for some minutes, until tomorrow 7:00, until resumed (0), or resume (null). */
+  async function pause(how: 'hour' | 'tomorrow' | 'manual' | null) {
+    pauseMenu = false
+    const now = Math.floor(Date.now() / 1000)
+    let until: number | null = null
+    if (how === 'hour') until = now + 3600
+    else if (how === 'manual') until = 0
+    else if (how === 'tomorrow') {
+      const t = new Date()
+      t.setDate(t.getDate() + 1)
+      t.setHours(7, 0, 0, 0)
+      until = Math.floor(t.getTime() / 1000)
+    }
+    try {
+      view = await api.setPause(until)
+      say(until === null ? 'Syncing resumed on this computer.' : 'Syncing paused on this computer.')
+      poll()
+    } catch (e) {
+      fail(e)
+    }
+  }
+
+  const pausedText = $derived.by(() => {
+    const u = view?.pausedUntil
+    if (u === null || u === undefined) return null
+    if (u === 0) return 'until you resume it'
+    const d = new Date(u * 1000)
+    const sameDay = d.toDateString() === new Date().toDateString()
+    return `until ${sameDay ? '' : 'tomorrow '}${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+  })
+
   /** Quick setup: choose for the whole folder. */
   async function pickRoot(d: Dir) {
     await pick('', true, d)
@@ -231,7 +278,8 @@
   }
 
   function onkey(e: KeyboardEvent) {
-    if (e.key === 'Escape' && trust) trust = null
+    if (e.key === 'Escape' && pauseMenu) pauseMenu = false
+    else if (e.key === 'Escape' && trust) trust = null
     else if (e.key === 'Escape' && plan) plan = null
     else if ((e.key === 'F5' || (e.ctrlKey && e.key === 'r')) && !plan) {
       e.preventDefault()
@@ -248,6 +296,7 @@
 
   /** One plain line about copying, for the bottom bar. */
   const progress = $derived.by((): { text: string; tone: 'ok' | 'busy' | 'wait' | 'bad' } | null => {
+    if (pausedText) return { text: `Paused by you ${pausedText}. Nothing is copied to or from this computer.`, tone: 'wait' }
     if (!checks || !other) return null
     if (checks.length === 0) return { text: 'Nothing syncs yet. Press Quick setup to choose what to copy.', tone: 'wait' }
     if (checks.some((c) => c.errors.length)) return { text: 'Some files could not be copied. Press to see which.', tone: 'bad' }
@@ -300,6 +349,20 @@
           {view.fileConflicts} conflict{view.fileConflicts === 1 ? '' : 's'}
         </button>
       {/if}
+      <div class="pausewrap">
+        {#if pausedText}
+          <button class="btn primary" onclick={() => pause(null)} title="Paused {pausedText}">Resume syncing</button>
+        {:else}
+          <button class="btn" onclick={() => (pauseMenu = !pauseMenu)} aria-expanded={pauseMenu} title="Stop copying on this computer for a while">Pause</button>
+          {#if pauseMenu}
+            <div class="menu" role="menu">
+              <button role="menuitem" onclick={() => pause('hour')}>For 1 hour</button>
+              <button role="menuitem" onclick={() => pause('tomorrow')}>Until tomorrow morning</button>
+              <button role="menuitem" onclick={() => pause('manual')}>Until I resume</button>
+            </div>
+          {/if}
+        {/if}
+      </div>
       <button class="btn" onclick={() => (trust = 'versions')} title="Get back a file that was changed or deleted in the last 30 days">Old versions</button>
       <button class="btn" onclick={() => (trust = 'check')} title="See whether every synced folder is fully copied">Progress</button>
       <button class="btn" onclick={() => (guide = true)} title="Choose what to copy in two steps">Quick setup</button>
@@ -330,9 +393,15 @@
       <button class="btn" onclick={() => resume(h.folder)}>Resume syncing</button>
     </div>
   {/each}
-  {#if view?.stage === 'ready' && view.watch && view.watch.running && !view.watch.gateOpen}
+  {#if pausedText}
     <div class="banner warn">
-      <span>Copying is on hold: {view.watch.reason}. It starts again by itself when the connection is suitable.</span>
+      <span>Syncing is paused on this computer {pausedText}. Files stay as they are; changes on either side wait and are copied after you resume.</span>
+      <button class="btn" onclick={() => pause(null)}>Resume now</button>
+    </div>
+  {/if}
+  {#if view?.stage === 'ready' && view.watch && view.watch.running && !view.watch.gateOpen && view.watch.reason !== 'you paused syncing'}
+    <div class="banner warn">
+      <span>Copying is on hold: {view.watch.reason?.replace('you paused syncing, ', '')}. It starts again by itself when the connection is suitable.</span>
       {#if view.watch.metered && !view.watch.allowMetered}<button class="btn" onclick={() => allow('metered', true)}>Copy anyway on this network</button>{/if}
       {#if view.watch.relayed && !view.watch.allowRelay}<button class="btn" onclick={() => allow('relay', true)}>Copy anyway through the relay</button>{/if}
     </div>
@@ -416,11 +485,7 @@
           <DirPicker value={d} {there} onpick={(x) => pick('', true, x)} />
           <p class="say">{sentence(d, there)}</p>
           <p class="muted small">Every folder and file follows this, except the ones you choose differently in the list. To leave a big project out, click it in the list and choose Don't sync.</p>
-          <div class="never">
-            <h3>Always left out</h3>
-            <p class="muted small">Secrets and files that can be rebuilt stay on each computer, whatever you choose.</p>
-            <p class="mono small">API keys · .env · keystores · {view.alwaysIgnore.map((x) => x.replace('(?d)', '')).join(' · ')}</p>
-          </div>
+          <LeaveOut list={view.alwaysIgnore} onchange={setLeaveOut} />
           <p class="muted small">{there}'s file list last updated: {ago(view.remoteListAge)}</p>
           {#if view.watch}
             <div class="never">
@@ -434,9 +499,9 @@
       </aside>
     </main>
 
-    <footer class="bar" class:live={view.edits.length > 0}>
-      {#if view.edits.length}
-        <span><b>{view.edits.length}</b> change{view.edits.length === 1 ? '' : 's'} not saved yet</span>
+    <footer class="bar" class:live={changes > 0}>
+      {#if changes}
+        <span><b>{changes}</b> change{changes === 1 ? '' : 's'} not saved yet</span>
         <div class="grow"></div>
         <button class="btn" onclick={discard}>Undo changes</button>
         <button class="btn primary" onclick={review}>Review</button>
@@ -807,6 +872,32 @@
   }
   .bar.live {
     background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  }
+  .pausewrap {
+    position: relative;
+  }
+  .menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    min-width: 200px;
+    padding: 4px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+  .menu button {
+    padding: 8px 10px;
+    border-radius: 7px;
+    text-align: left;
+    white-space: nowrap;
+  }
+  .menu button:hover {
+    background: var(--surface-2);
   }
   .status {
     display: flex;

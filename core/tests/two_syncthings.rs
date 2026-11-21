@@ -267,6 +267,21 @@ fn two_computers_sync_by_the_rules() {
     setu_core::watch::release_hold(&wdir, &b.client, &held.folder).unwrap();
     assert!(b.client.folders().unwrap().iter().any(|f| f["id"] == held.folder.as_str() && f["paused"] == false));
 
+    // Pause by the person, without the helper: every Setu folder on A pauses, then resumes.
+    let pdir = da.join("pause-config");
+    std::fs::create_dir_all(&pdir).unwrap();
+    let mut pcfg = setu_core::local::LocalConfig { root: ra.clone(), allow_metered: true, allow_relay: true, paused_until: Some(0), ..Default::default() };
+    let setu_paused = |c: &Client| -> Vec<bool> {
+        c.folders().unwrap().iter().filter(|f| f["id"].as_str().is_some_and(|i| i.starts_with("setu-f-"))).map(|f| f["paused"] == true).collect()
+    };
+    let g = setu_core::watch::gate_now(&pdir, &pcfg, &a.client).unwrap();
+    assert!(!g.open && g.user_paused);
+    assert!(setu_paused(&a.client).iter().all(|p| *p), "all Setu folders on A must be paused");
+    pcfg.paused_until = None;
+    let g = setu_core::watch::gate_now(&pdir, &pcfg, &a.client).unwrap();
+    assert!(g.open);
+    assert!(setu_paused(&a.client).iter().all(|p| !*p), "all Setu folders on A must be resumed");
+
     // Revision 2: switch "both" off. The folder goes from Syncthing; its files stay on both sides.
     rs.set("both", Kind::Dir, None).unwrap();
     rs.revision = 2;

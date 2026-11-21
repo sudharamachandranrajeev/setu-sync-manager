@@ -67,6 +67,10 @@ does that, and Setu tells Syncthing what to do. It works with two computers at a
 - 🕰️ **Old versions for 30 days** – put back any replaced or deleted file from a list.
 - ✅ **Is it all copied?** – one click shows, folder by folder, that every file is complete and
   identical on both computers, or what is still missing and why.
+- ⏸️ **Pause** – stop copying on this computer for an hour, until tomorrow morning, or until you
+  resume. Changes on either side wait and are copied afterwards.
+- 🚫 **Leave out by name** – add a name or pattern, such as `*.iso` or `videos`, and it is never
+  copied, in any folder, on either computer.
 - 🔔 **Notifications and tray** – a desktop notice when a folder is paused, a conflict appears or
   files cannot sync.
 
@@ -141,7 +145,8 @@ On the Linux computer:
 4. On Windows, open Setu, press **Review** and **Start syncing**.
 
 To leave out something deeper, such as one project inside a folder, click it in the list and
-choose **Don't sync**. Build output (`node_modules`, `target`, `build`, `dist`, `.git`) is
+choose **Don't sync**. To leave out every file of a kind wherever it is, such as all `*.iso`
+disk images, click **Everything**, open **Always left out** and add the pattern. Build output (`node_modules`, `target`, `build`, `dist`, `.git`) is
 always left out, so code projects are usually much smaller than they look on disk.
 
 What this means day to day: edits and deletes on Windows reach Linux. Edits you make on Linux

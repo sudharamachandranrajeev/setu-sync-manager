@@ -34,6 +34,9 @@ pub struct Gate {
     pub open: bool,
     pub metered: bool,
     pub relayed: bool,
+    /// Closed because the person paused syncing in Setu.
+    #[serde(default)]
+    pub user_paused: bool,
     /// Plain words for the app, e.g. "metered network".
     pub reason: Option<String>,
     pub checked_at: u64,
@@ -160,6 +163,10 @@ pub fn check_gate(cfg: &LocalConfig, client: &Client, me: &str) -> Gate {
     let m = metered().unwrap_or(false);
     let r = other_ip(client, me).and_then(|ip| relayed(&ip)).unwrap_or(false);
     let mut reasons = Vec::new();
+    let user_paused = cfg.user_paused(now_secs());
+    if user_paused {
+        reasons.push("you paused syncing");
+    }
     if m && !cfg.allow_metered {
         reasons.push("metered network");
     }
@@ -170,6 +177,7 @@ pub fn check_gate(cfg: &LocalConfig, client: &Client, me: &str) -> Gate {
         open: reasons.is_empty(),
         metered: m,
         relayed: r,
+        user_paused,
         reason: (!reasons.is_empty()).then(|| reasons.join(", ")),
         checked_at: now_secs(),
     }
@@ -206,6 +214,17 @@ pub fn apply_gate(state: &mut WatchState, gate: Gate, client: &Client) -> Result
     }
     state.gate = gate;
     Ok(())
+}
+
+/// Check the network and the person's pause now and pause or resume Setu's folders to match.
+/// For when the helper is not running; while it runs, the helper does this itself.
+pub fn gate_now(dir: &Path, cfg: &LocalConfig, client: &Client) -> Result<Gate, Error> {
+    let me = client.my_id()?;
+    let mut state = read_state(dir);
+    let gate = check_gate(cfg, client, &me);
+    apply_gate(&mut state, gate, client)?;
+    write_state(dir, &state)?;
+    Ok(state.gate)
 }
 
 /// Count deletions per folder in a sliding window.
@@ -288,11 +307,21 @@ pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, clie
     // At start, treat the gate as open: a closed gate is told once, an open one not at all.
     let mut gate_known = false;
     loop {
+        // A pause or resume in Setu takes effect at once, not at the next network check.
+        if let Ok(cfg) = cfg_loader()
+            && cfg.user_paused(now_secs()) != state.gate.user_paused
+        {
+            next_gate = Instant::now();
+        }
         if Instant::now() >= next_gate {
             if let Ok(cfg) = cfg_loader() {
                 let was_open = if gate_known { state.gate.open } else { true };
+                let was_user = state.gate.user_paused;
                 let gate = check_gate(&cfg, client, &me);
+                // The person paused or resumed it themselves: no notice for that.
+                let quiet = was_user || gate.user_paused;
                 match apply_gate(&mut state, gate, client) {
+                    Ok(()) if quiet => {}
                     Ok(()) if was_open && !state.gate.open => notify(&notice(
                         "Setu: syncing on hold",
                         format!("{}. Copying starts again by itself when the connection is suitable.", state.gate.reason.as_deref().unwrap_or("network")),

@@ -114,6 +114,29 @@ pub const NEVER_SYNC: &[&str] = &[
     ".env.*",
 ];
 
+/// Check one "always left out" entry: a file or folder name, optionally with `*` and `?`, that
+/// matches at any depth. Anything Syncthing would read as more than a name is refused, because
+/// the same line goes into every Setu folder's ignore list on both computers.
+pub fn check_leave_out(line: &str) -> Result<(), String> {
+    let mut name = line;
+    while let Some(rest) = name.strip_prefix("(?d)").or_else(|| name.strip_prefix("(?i)")) {
+        name = rest;
+    }
+    if name.is_empty() {
+        return Err(format!("{line:?}: give a name, such as videos or *.iso"));
+    }
+    if name.contains(['/', '\\']) {
+        return Err(format!("{line:?}: give a name only, without / or \\; it is left out wherever it appears"));
+    }
+    if name.starts_with(['!', '#']) || name.starts_with("//") || name.contains(['\n', '\r']) {
+        return Err(format!("{line:?}: cannot start with ! or # or //"));
+    }
+    if name.chars().all(|c| c == '*' || c == '?' || c == '.') {
+        return Err(format!("{line:?} would leave out everything"));
+    }
+    Ok(())
+}
+
 /// The starting "always ignore" list: build output, caches, git data and OS clutter. Editable.
 pub const DEFAULT_ALWAYS_IGNORE: &[&str] = &[
     ".git",
@@ -204,6 +227,9 @@ impl RuleSet {
             _ => Ok(()),
         };
         check_mode(&self.root, "root")?;
+        for line in &self.always_ignore {
+            check_leave_out(line).map_err(Error::Rules)?;
+        }
         for (path, rule) in &self.rules {
             if normalize(path)? != *path {
                 return bad(format!("{path:?} is not a clean relative path"));
@@ -261,6 +287,21 @@ impl RuleSet {
             self.rules.remove(&p);
         }
         self.validate().inspect_err(|_| *self = before)
+    }
+
+    /// Replace the "always left out" list. Entries are trimmed; blanks and repeats are dropped.
+    pub fn set_always_ignore(&mut self, list: &[String]) -> Result<(), Error> {
+        let mut out: Vec<String> = Vec::new();
+        for l in list {
+            let l = l.trim();
+            if l.is_empty() || out.iter().any(|x| x == l) {
+                continue;
+            }
+            check_leave_out(l).map_err(Error::Rules)?;
+            out.push(l.to_string());
+        }
+        self.always_ignore = out;
+        Ok(())
     }
 
     pub fn device_name<'a>(&'a self, id: &'a str) -> &'a str {
@@ -355,6 +396,21 @@ mod tests {
         assert!(rs.set("a", Kind::Dir, Some(Mode::From("CCCCCCC-CCCCCCC-CCCCCCC-CCCCCCC-CCCCCCC-CCCCCCC-CCCCCCC-CCCCCCC".into()))).is_err());
         assert!(Mode::parse("sideways").is_err());
         assert!(!valid_device_id("abc"));
+    }
+
+    #[test]
+    fn leave_out_entries() {
+        for ok in ["videos", "*.iso", "(?d)node_modules", "Big Project", "a?c"] {
+            assert!(check_leave_out(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "a/b", "/x", "a\\b", "!keep", "#include x", "//c", "*", "*.*", "(?d)"] {
+            assert!(check_leave_out(bad).is_err(), "{bad}");
+        }
+        let mut rs = two();
+        rs.set_always_ignore(&[" *.iso ".into(), "".into(), "*.iso".into(), "videos".into()]).unwrap();
+        assert_eq!(rs.always_ignore, vec!["*.iso", "videos"]);
+        assert!(rs.set_always_ignore(&["a/b".into()]).is_err());
+        assert_eq!(rs.always_ignore, vec!["*.iso", "videos"]);
     }
 
     #[test]

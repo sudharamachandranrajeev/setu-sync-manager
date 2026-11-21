@@ -35,6 +35,11 @@ setu: choose what syncs between two computers, and which way.
   setu watch                         Run the background helper (network gate, delete guard)
   setu allow metered|relay on|off    Let Setu's folders sync on a metered network or relay
   setu resume <folder-id>            Resume a folder the delete guard paused
+  setu pause [<minutes>]             Pause syncing on this computer (for a while, or until
+                                     `setu unpause`)
+  setu unpause                       Resume syncing after `setu pause`
+  setu leave-out [add|remove <name>] Show or change the names always left out, such as
+                                     *.iso or videos (goes into the draft)
   setu conflicts                     List conflict copies in synced folders
   setu keep <conflict-copy> copy|file
                                      Settle a conflict: keep the copy or the current file.
@@ -188,6 +193,57 @@ fn run(args: &[String]) -> Result<(), Error> {
             }
             cfg.save(&dir)?;
             println!("Saved. `setu watch` uses it within a minute.");
+            Ok(())
+        }
+        "pause" | "unpause" => {
+            let dir = config_dir();
+            let mut cfg = LocalConfig::load(&dir)?;
+            cfg.paused_until = match (args[0].as_str(), args.get(1)) {
+                ("unpause", _) => None,
+                (_, None) => Some(0),
+                (_, Some(m)) => {
+                    let m: u64 = m.parse().ok().filter(|&m| m > 0).ok_or_else(|| Error::Setup("usage: setu pause [<minutes>]".into()))?;
+                    Some(setu_core::control::now_secs() + m * 60)
+                }
+            };
+            cfg.save(&dir)?;
+            let s = Session::open()?;
+            if watch::read_state(&s.dir).alive_at + 120 < setu_core::control::now_secs() {
+                watch::gate_now(&s.dir, &cfg, &s.client)?;
+            }
+            println!("{}", match cfg.paused_until {
+                None => "Syncing resumes (unless the network is on hold).".to_string(),
+                Some(0) => "Syncing paused here until `setu unpause`.".to_string(),
+                Some(_) => format!("Syncing paused here for {} minutes.", args[1]),
+            });
+            Ok(())
+        }
+        "leave-out" => {
+            let s = Session::open()?;
+            let mut rules = s.working()?;
+            match (args.get(1).map(String::as_str), args.get(2)) {
+                (None, _) => {
+                    for l in &rules.always_ignore {
+                        println!("{l}");
+                    }
+                    return Ok(());
+                }
+                (Some("add"), Some(n)) => {
+                    let mut list = rules.always_ignore.clone();
+                    list.push(n.clone());
+                    rules.set_always_ignore(&list)?;
+                }
+                (Some("remove"), Some(n)) => {
+                    let list: Vec<String> = rules.always_ignore.iter().filter(|l| *l != n).cloned().collect();
+                    if list.len() == rules.always_ignore.len() {
+                        return Err(Error::Setup(format!("{n:?} is not in the list")));
+                    }
+                    rules.set_always_ignore(&list)?;
+                }
+                _ => return Err(Error::Setup("usage: setu leave-out [add|remove <name>]".into())),
+            }
+            s.save_draft(rules)?;
+            println!("Saved in the draft. `setu apply` makes it count, on both computers.");
             Ok(())
         }
         "resume" => {

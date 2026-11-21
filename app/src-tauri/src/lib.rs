@@ -96,7 +96,26 @@ struct View {
     remote_entries: Option<usize>,
     remote_list_age: Option<u64>,
     always_ignore: Vec<String>,
+    /// Changes to the "always left out" list not saved yet.
+    leave_out: LeaveOutEdits,
+    /// Syncing paused here by the person: until this time, or 0 until resumed.
+    paused_until: Option<u64>,
     watch: Option<WatchView>,
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct LeaveOutEdits {
+    added: Vec<String>,
+    removed: Vec<String>,
+}
+
+fn leave_out_edits(shared: Option<&RuleSet>, working: &RuleSet) -> LeaveOutEdits {
+    let Some(shared) = shared else { return LeaveOutEdits::default() };
+    LeaveOutEdits {
+        added: working.always_ignore.iter().filter(|l| !shared.always_ignore.contains(l)).cloned().collect(),
+        removed: shared.always_ignore.iter().filter(|l| !working.always_ignore.contains(l)).cloned().collect(),
+    }
 }
 
 #[derive(Serialize)]
@@ -126,6 +145,7 @@ struct PlanView {
     plan: Plan,
     preview: Preview,
     edits: Vec<EditView>,
+    leave_out: LeaveOutEdits,
 }
 
 fn err(e: Error) -> String {
@@ -186,6 +206,8 @@ fn view(st: &mut AppState) -> View {
         remote_entries: None,
         remote_list_age: None,
         always_ignore: Vec::new(),
+        leave_out: LeaveOutEdits::default(),
+        paused_until: None,
         watch: None,
     };
     if let Err(e) = open(st) {
@@ -229,6 +251,8 @@ fn view(st: &mut AppState) -> View {
     v.root_mode = Some(working.root.to_string());
     v.edits = edits(Some(&shared), &working);
     v.always_ignore = working.always_ignore.clone();
+    v.leave_out = leave_out_edits(Some(&shared), &working);
+    v.paused_until = s.local.paused_until.filter(|&t| t == 0 || t > now_secs());
     let w = watch::read_state(&s.dir);
     let rels: Vec<String> = std::iter::once(String::new()).chain(working.rules.keys().cloned()).collect();
     v.watch = Some(WatchView {
@@ -330,6 +354,40 @@ async fn set_rule(state: State<'_>, path: String, dir: bool, mode: Option<String
 }
 
 #[tauri::command]
+async fn set_leave_out(state: State<'_>, list: Vec<String>) -> Result<View, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    {
+        let s = st.session.as_ref().unwrap();
+        let mut rules = s.working().map_err(err)?;
+        rules.set_always_ignore(&list).map_err(err)?;
+        s.save_draft(rules).map_err(err)?;
+    }
+    st.shown_plan = None;
+    // The list changes what the folder view counts.
+    st.local = None;
+    Ok(view(&mut st))
+}
+
+/// Pause syncing on this computer until `until` (Unix seconds; 0 = until resumed), or resume
+/// it (`None`). The helper acts on it within seconds; without the helper, Setu acts at once.
+#[tauri::command]
+async fn set_pause(state: State<'_>, until: Option<u64>) -> Result<View, String> {
+    let mut st = state.lock().unwrap();
+    let dir = config_dir();
+    let mut cfg = LocalConfig::load(&dir).map_err(err)?;
+    cfg.paused_until = until;
+    cfg.save(&dir).map_err(err)?;
+    st.session = None;
+    open(&mut st)?;
+    let s = st.session.as_ref().unwrap();
+    if watch::read_state(&s.dir).alive_at + 120 < now_secs() {
+        watch::gate_now(&s.dir, &cfg, &s.client).map_err(err)?;
+    }
+    Ok(view(&mut st))
+}
+
+#[tauri::command]
 async fn discard(state: State<'_>) -> Result<View, String> {
     let mut st = state.lock().unwrap();
     open(&mut st)?;
@@ -350,12 +408,13 @@ async fn plan(state: State<'_>) -> Result<PlanView, String> {
     let (rules, plan) = s.plan().map_err(err)?;
     let shared = s.shared().map_err(err)?;
     let edits = edits(shared.as_ref(), &rules);
+    let leave_out = leave_out_edits(shared.as_ref(), &rules);
     let empty = Tree::default();
     let here = st.local.as_ref().unwrap_or(&empty);
     let there = st.remote.as_ref().map(|t| (t, st.remote_root.as_deref()));
     let preview = s.preview(&rules, &plan, here, there);
     st.shown_plan = Some((plan.clone(), preview.clone()));
-    Ok(PlanView { plan, preview, edits })
+    Ok(PlanView { plan, preview, edits, leave_out })
 }
 
 #[tauri::command]
@@ -460,7 +519,7 @@ pub fn run() {
             tray::setup(app)?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![state, refresh, children, set_rule, discard, plan, apply, init, create_rules, set_allow, resume, conflicts, keep, versions, restore, verify])
+        .invoke_handler(tauri::generate_handler![state, refresh, children, set_rule, set_leave_out, set_pause, discard, plan, apply, init, create_rules, set_allow, resume, conflicts, keep, versions, restore, verify])
         .run(tauri::generate_context!())
         .expect("error while running Setu");
 }

@@ -20,6 +20,10 @@ pub struct LocalConfig {
     /// Let Setu's folders sync when the link goes through a Tailscale relay (off by default).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_relay: bool,
+    /// Syncing paused here by the person: until this time (Unix seconds), or `0` until they
+    /// resume it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_until: Option<u64>,
 }
 
 /// `SETU_CONFIG_DIR`, else `%APPDATA%\Setu` on Windows, else `$XDG_CONFIG_HOME/setu`.
@@ -36,6 +40,15 @@ pub fn config_dir() -> PathBuf {
 }
 
 impl LocalConfig {
+    /// Has the person paused syncing on this computer, as of `now`?
+    pub fn user_paused(&self, now: u64) -> bool {
+        match self.paused_until {
+            Some(0) => true,
+            Some(t) => now < t,
+            None => false,
+        }
+    }
+
     pub fn load(dir: &Path) -> Result<LocalConfig, Error> {
         let p = dir.join("local.json");
         let s = std::fs::read_to_string(&p)
