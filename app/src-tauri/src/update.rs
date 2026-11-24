@@ -186,6 +186,20 @@ mod tests {
         assert_eq!(newest(&[release("0.1.0", true)], &cur).unwrap().version, "0.1.0");
     }
 
+    /// The newest published release verifies with the key built into Setu. Needs the network:
+    /// `cargo test -p setu-app -- --ignored live_release`.
+    #[test]
+    #[ignore]
+    fn live_release_verifies() {
+        let mut r = agent(20).get(&format!("https://api.github.com/repos/{REPO}/releases?per_page=20")).call().unwrap();
+        let releases: Vec<Value> = r.body_mut().read_json().unwrap();
+        let u = newest(&releases, &semver::Version::new(0, 0, 0)).expect("a signed release");
+        let data = download(&u.url, 512 * 1024 * 1024).unwrap();
+        let sig = download(&u.sig_url, 64 * 1024).unwrap();
+        verify(&data, &sig, PUBLIC_KEY).unwrap();
+        println!("verified {} ({} bytes)", u.asset, data.len());
+    }
+
     #[test]
     fn checks_signatures() {
         // Signed with a throwaway key: `tauri signer generate --ci`, `tauri signer sign`.
