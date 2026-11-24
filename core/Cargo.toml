@@ -26,6 +26,15 @@ zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] 
 [target.'cfg(windows)'.dependencies]
 keyring-core = "1"
 windows-native-keyring-store = "1"
+# The pipe between `setu` and the running Setu: named pipe, its access list, the user's SID.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"

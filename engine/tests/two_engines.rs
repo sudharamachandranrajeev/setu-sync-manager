@@ -1,11 +1,11 @@
-//! End to end: two real Syncthings on this computer, talking over loopback only, each with its
-//! own temporary home, ports and folders. They never touch the Syncthing you use day to day.
+//! End to end: two built-in engines on this computer, talking over loopback only, each with its
+//! own temporary home, ports and folders. They never touch the Setu you use day to day.
 //!
-//! Slow (about a minute), so it is ignored by default: `cargo test -- --ignored`.
+//! Slow (about a minute), so it is ignored by default:
+//! `cargo test -p setu-engine --test two_engines -- --ignored`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use serde_json::json;
@@ -34,10 +34,6 @@ fn add_control(st: &St, path: &Path, peer: &str) {
 #[test]
 #[ignore]
 fn two_computers_sync_by_the_rules() {
-    if Command::new("syncthing").arg("--version").output().is_err() {
-        eprintln!("syncthing not installed; skipping");
-        return;
-    }
     let tmp = tempfile::tempdir().unwrap();
     // Setu keeps ignore-file backups in its config dir; keep the test's out of the real one.
     unsafe { std::env::set_var("SETU_CONFIG_DIR", tmp.path().join("setu-config")) };
@@ -152,12 +148,11 @@ fn two_computers_sync_by_the_rules() {
     assert!(wait_for(90, || read(&rb, "shared/many/69.txt")).is_some(), "bulk files never arrived");
     let wdir = db.join("watch-config");
     std::fs::create_dir_all(&wdir).unwrap();
-    let bhome = db.join("home");
     {
         let wdir = wdir.clone();
         let root = rb.clone();
+        let c = b.client.clone();
         std::thread::spawn(move || {
-            let c = Client::discover(Some(&bhome)).unwrap();
             let cfg = move || Ok(setu_core::local::LocalConfig { root: root.clone(), allow_metered: true, allow_relay: true, ..Default::default() });
             let _ = setu_core::watch::run(&wdir, cfg, &c, &|n| eprintln!("notice: {} {}", n.title, n.body));
         });

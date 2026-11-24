@@ -1,112 +1,102 @@
-//! A small client for this computer's own Syncthing, through its local REST API.
+//! Setu's handle on its sync engine (Syncthing's code, built into Setu).
+//!
+//! Inside Setu the engine runs in the same process and `Client` calls it directly. The `setu`
+//! command line reaches the running Setu through a local pipe that only this user can open
+//! (see `pipe`). Either way the answers are JSON in the shapes of Syncthing's REST API, so the
+//! rest of Setu reads them as it always did. Nothing listens on a local HTTP port.
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
 
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::Error;
 
+/// Something that runs engine calls: the engine itself, or the pipe to the Setu that hosts it.
+pub trait Transport: Send + Sync {
+    fn call(&self, method: &str, args: &Value) -> Result<Value, Error>;
+}
+
+#[derive(Clone)]
 pub struct Client {
-    base: String,
-    key: String,
-    agent: ureq::Agent,
+    t: Arc<dyn Transport>,
+}
+
+static LOCAL: OnceLock<Arc<dyn Transport>> = OnceLock::new();
+
+/// Called once by the process that hosts the engine (Setu), so `Client::connect` uses it.
+pub fn set_local(t: Arc<dyn Transport>) {
+    let _ = LOCAL.set(t);
 }
 
 impl Client {
-    pub fn new(base: impl Into<String>, key: impl Into<String>) -> Client {
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(30)))
-            .build()
-            .into();
-        Client { base: base.into().trim_end_matches('/').to_string(), key: key.into(), agent }
+    pub fn with(t: Arc<dyn Transport>) -> Client {
+        Client { t }
     }
 
-    /// Connect using Syncthing's own config file. `home` overrides where it is looked for.
-    pub fn discover(home: Option<&Path>) -> Result<Client, Error> {
-        let candidates: Vec<PathBuf> = match home {
-            Some(h) => vec![h.join("config.xml")],
-            None => default_homes().into_iter().map(|h| h.join("config.xml")).collect(),
-        };
-        let path = candidates
-            .iter()
-            .find(|p| p.is_file())
-            .ok_or_else(|| Error::Syncthing("Syncthing's config.xml was not found; is Syncthing set up?".into()))?;
-        let xml = std::fs::read_to_string(path)?;
-        let (base, key) = parse_config(&xml)?;
-        Ok(Client::new(base, key))
+    /// The engine in this process when Setu hosts it here, else the running Setu over its
+    /// local pipe.
+    pub fn connect() -> Result<Client, Error> {
+        if let Some(t) = LOCAL.get() {
+            return Ok(Client { t: t.clone() });
+        }
+        crate::pipe::Pipe::connect().map(|p| Client { t: Arc::new(p) })
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}/rest/{}", self.base, path)
+    fn get<T: DeserializeOwned>(&self, method: &str, args: Value) -> Result<T, Error> {
+        let v = self.t.call(method, &args)?;
+        serde_json::from_value(v).map_err(|e| Error::Syncthing(format!("{method}: {e}")))
     }
 
-    fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
-        let mut resp = self
-            .agent
-            .get(&self.url(path))
-            .header("X-API-Key", &self.key)
-            .call()
-            .map_err(|e| Error::Syncthing(format!("GET {path}: {e}")))?;
-        resp.body_mut().read_json::<T>().map_err(|e| Error::Syncthing(format!("GET {path}: {e}")))
-    }
-
-    fn send(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(), Error> {
-        let url = self.url(path);
-        let r = match (method, body) {
-            ("PUT", Some(b)) => self.agent.put(&url).header("X-API-Key", &self.key).send_json(b),
-            ("PATCH", Some(b)) => self.agent.patch(&url).header("X-API-Key", &self.key).send_json(b),
-            ("POST", Some(b)) => self.agent.post(&url).header("X-API-Key", &self.key).send_json(b),
-            ("POST", None) => self.agent.post(&url).header("X-API-Key", &self.key).send_empty(),
-            ("DELETE", None) => self.agent.delete(&url).header("X-API-Key", &self.key).call(),
-            _ => unreachable!("unsupported request {method}"),
-        };
-        r.map(|_| ()).map_err(|e| Error::Syncthing(format!("{method} {path}: {e}")))
+    fn send(&self, method: &str, args: Value) -> Result<(), Error> {
+        self.t.call(method, &args).map(drop)
     }
 
     pub fn my_id(&self) -> Result<String, Error> {
-        let v: Value = self.get("system/status")?;
-        v["myID"].as_str().map(String::from).ok_or_else(|| Error::Syncthing("no myID in system/status".into()))
+        self.get("my_id", Value::Null)
     }
 
     pub fn folders(&self) -> Result<Vec<Value>, Error> {
-        self.get("config/folders")
+        self.get("folders", Value::Null)
     }
 
     pub fn devices(&self) -> Result<Vec<Value>, Error> {
-        self.get("config/devices")
+        self.get("devices", Value::Null)
     }
 
     pub fn put_device(&self, device: &Value) -> Result<(), Error> {
-        let id = device["deviceID"].as_str().unwrap_or_default();
-        self.send("PUT", &format!("config/devices/{}", enc(id)), Some(device))
+        self.send("put_device", json!({ "value": device }))
     }
 
     /// Events after `since`, waiting up to `timeout` seconds for new ones.
     pub fn events(&self, since: u64, timeout: u64) -> Result<Vec<Value>, Error> {
-        self.get(&format!("events?since={since}&timeout={timeout}&events=ItemFinished,LocalIndexUpdated,FolderErrors"))
+        self.events_of(since, timeout, "ItemFinished,LocalIndexUpdated,FolderErrors")
+    }
+
+    /// Events of the given comma-separated types after `since`, waiting up to `timeout` seconds
+    /// (0 = answer at once).
+    pub fn events_of(&self, since: u64, timeout: u64, kinds: &str) -> Result<Vec<Value>, Error> {
+        self.get("events", json!({ "since": since, "timeout": timeout, "kinds": kinds }))
     }
 
     pub fn default_folder(&self) -> Result<Value, Error> {
-        self.get("config/defaults/folder")
+        self.get("default_folder", Value::Null)
     }
 
     pub fn put_folder(&self, folder: &Value) -> Result<(), Error> {
-        let id = folder["id"].as_str().unwrap_or_default();
-        self.send("PUT", &format!("config/folders/{}", enc(id)), Some(folder))
+        self.send("put_folder", json!({ "value": folder }))
     }
 
     pub fn patch_folder(&self, id: &str, patch: &Value) -> Result<(), Error> {
-        self.send("PATCH", &format!("config/folders/{}", enc(id)), Some(patch))
+        self.send("patch_folder", json!({ "id": id, "value": patch }))
     }
 
     pub fn delete_folder(&self, id: &str) -> Result<(), Error> {
-        self.send("DELETE", &format!("config/folders/{}", enc(id)), None)
+        self.send("delete_folder", json!({ "id": id }))
     }
 
     pub fn ignores(&self, id: &str) -> Result<Vec<String>, Error> {
-        let v: Value = self.get(&format!("db/ignores?folder={}", enc(id)))?;
+        let v: Value = self.get("ignores", json!({ "folder": id }))?;
         Ok(v["ignore"]
             .as_array()
             .map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect())
@@ -114,110 +104,50 @@ impl Client {
     }
 
     pub fn set_ignores(&self, id: &str, lines: &[String]) -> Result<(), Error> {
-        self.send("POST", &format!("db/ignores?folder={}", enc(id)), Some(&json!({ "ignore": lines })))
+        self.send("set_ignores", json!({ "folder": id, "ignore": lines }))
     }
 
     pub fn connections(&self) -> Result<Value, Error> {
-        self.get("system/connections")
+        self.get("connections", Value::Null)
     }
 
     pub fn folder_status(&self, id: &str) -> Result<Value, Error> {
-        self.get(&format!("db/status?folder={}", enc(id)))
+        self.get("folder_status", json!({ "folder": id }))
     }
 
     pub fn completion(&self, folder: &str, device: &str) -> Result<Value, Error> {
-        self.get(&format!("db/completion?folder={}&device={}", enc(folder), enc(device)))
+        self.get("completion", json!({ "folder": folder, "device": device }))
     }
 
     /// Old versions kept by the folder's versioning: path → list of versions.
     pub fn versions(&self, folder: &str) -> Result<Value, Error> {
-        self.get(&format!("folder/versions?folder={}", enc(folder)))
+        self.get("versions", json!({ "folder": folder }))
     }
 
     /// Files this computer still needs from the other one.
     pub fn need(&self, folder: &str) -> Result<Value, Error> {
-        self.get(&format!("db/need?folder={}&perpage=200", enc(folder)))
+        self.get("need", json!({ "folder": folder, "perpage": 200 }))
     }
 
     /// Files changed here in a receive-only folder (not sent back).
     pub fn local_changed(&self, folder: &str) -> Result<Value, Error> {
-        self.get(&format!("db/localchanged?folder={}&perpage=200", enc(folder)))
+        self.get("local_changed", json!({ "folder": folder, "perpage": 200 }))
     }
 
     /// Files that failed to sync, with the reason.
     pub fn folder_errors(&self, folder: &str) -> Result<Value, Error> {
-        self.get(&format!("folder/errors?folder={}&perpage=200", enc(folder)))
+        self.get("folder_errors", json!({ "folder": folder, "perpage": 200 }))
     }
 
     pub fn options(&self) -> Result<Value, Error> {
-        self.get("config/options")
+        self.get("options", Value::Null)
     }
 
     pub fn patch_options(&self, patch: &Value) -> Result<(), Error> {
-        self.send("PATCH", "config/options", Some(patch))
+        self.send("patch_options", json!({ "value": patch }))
     }
 
     pub fn scan(&self, id: &str) -> Result<(), Error> {
-        self.send("POST", &format!("db/scan?folder={}", enc(id)), None)
-    }
-}
-
-/// Where Syncthing keeps its config on this OS, in the order Syncthing itself looks.
-pub fn default_homes() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Some(h) = std::env::var_os("STHOMEDIR") {
-        v.push(PathBuf::from(h));
-    }
-    if cfg!(windows) {
-        if let Some(l) = std::env::var_os("LOCALAPPDATA") {
-            v.push(PathBuf::from(l).join("Syncthing"));
-        }
-    } else {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or(home.join(".local/state"));
-        let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or(home.join(".config"));
-        v.push(state.join("syncthing"));
-        v.push(config.join("syncthing"));
-    }
-    v
-}
-
-/// The GUI address and API key from Syncthing's config.xml.
-pub fn parse_config(xml: &str) -> Result<(String, String), Error> {
-    let doc = roxmltree::Document::parse(xml).map_err(|e| Error::Syncthing(format!("config.xml: {e}")))?;
-    let gui = doc
-        .descendants()
-        .find(|n| n.has_tag_name("gui"))
-        .ok_or_else(|| Error::Syncthing("config.xml has no <gui>".into()))?;
-    if gui.attribute("tls") == Some("true") {
-        return Err(Error::Syncthing("Syncthing's GUI uses HTTPS; Setu needs it on plain HTTP at 127.0.0.1".into()));
-    }
-    let text = |tag: &str| gui.children().find(|n| n.has_tag_name(tag)).and_then(|n| n.text()).map(str::trim);
-    let key = text("apikey").filter(|k| !k.is_empty()).ok_or_else(|| Error::Syncthing("config.xml has no API key".into()))?;
-    let addr = text("address").unwrap_or("127.0.0.1:8384");
-    let port = addr.rsplit(':').next().unwrap_or("8384");
-    // Always talk over loopback, even if the GUI listens more widely.
-    Ok((format!("http://127.0.0.1:{port}"), key.to_string()))
-}
-
-fn enc(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_gui_and_key() {
-        let xml = r#"<configuration><gui enabled="true" tls="false"><address>0.0.0.0:8385</address><apikey>abc</apikey></gui></configuration>"#;
-        assert_eq!(parse_config(xml).unwrap(), ("http://127.0.0.1:8385".into(), "abc".into()));
-        let tls = r#"<configuration><gui tls="true"><address>127.0.0.1:8384</address><apikey>k</apikey></gui></configuration>"#;
-        assert!(parse_config(tls).is_err());
+        self.send("scan", json!({ "folder": id }))
     }
 }

@@ -1,13 +1,20 @@
-//! Setu's window: thin commands over `setu-core`. All rules, planning and applying live in the
-//! core, so the app and the `setu` command always agree.
+//! Setu: the window, the tray, the sync engine and the background helper, in one process.
+//! The window's commands are thin calls into `setu-core`. All rules, planning and applying
+//! live in the core, so the app and the `setu` command always agree. The `setu` command reaches
+//! this process through its local pipe (`setu_core::pipe`).
 
+mod host;
+mod live;
+mod notify;
 mod tray;
+mod update;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use tauri::Manager;
 use setu_core::apply::{Plan, Report};
 use setu_core::index::Tree;
 use setu_core::compile::folder_id;
@@ -122,6 +129,8 @@ struct View {
     leave_out: LeaveOutEdits,
     /// Syncing paused here by the person: until this time, or 0 until resumed.
     paused_until: Option<u64>,
+    /// No desktop notifications about copy progress.
+    quiet_progress: bool,
     watch: Option<WatchView>,
 }
 
@@ -266,6 +275,7 @@ fn view(st: &mut AppState) -> View {
         always_ignore: Vec::new(),
         leave_out: LeaveOutEdits::default(),
         paused_until: None,
+        quiet_progress: false,
         watch: None,
     };
     if let Err(e) = open(st) {
@@ -303,6 +313,7 @@ fn view(st: &mut AppState) -> View {
     v.always_ignore = working.always_ignore.clone();
     v.leave_out = leave_out_edits(Some(&shared), &working);
     v.paused_until = s.local.paused_until.filter(|&t| t == 0 || t > now_secs());
+    v.quiet_progress = s.local.quiet_progress;
     let w = watch::read_state(&s.dir);
     let rels: Vec<String> = std::iter::once(String::new()).chain(working.rules.keys().cloned()).collect();
     v.watch = Some(WatchView {
@@ -421,20 +432,87 @@ async fn set_leave_out(state: State<'_>, list: Vec<String>) -> Result<View, Stri
 
 /// Pause syncing on this computer until `until` (Unix seconds; 0 = until resumed), or resume
 /// it (`None`). The helper acts on it within seconds; without the helper, Setu acts at once.
-#[tauri::command]
-async fn set_pause(state: State<'_>, until: Option<u64>) -> Result<View, String> {
-    let mut st = state.lock().unwrap();
+pub(crate) fn pause_until(until: Option<u64>) -> Result<(), String> {
     let dir = config_dir();
     let mut cfg = LocalConfig::load(&dir).map_err(err)?;
     cfg.paused_until = until;
     cfg.save(&dir).map_err(err)?;
+    if watch::read_state(&dir).alive_at + 120 < now_secs() {
+        let client = setu_core::syncthing::Client::connect().map_err(err)?;
+        watch::gate_now(&dir, &cfg, &client).map_err(err)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_pause(state: State<'_>, until: Option<u64>) -> Result<View, String> {
+    let mut st = state.lock().unwrap();
+    pause_until(until)?;
     st.session = None;
+    Ok(view(&mut st))
+}
+
+/// Pause or resume one synced folder on this computer.
+#[tauri::command]
+async fn pause_folder(state: State<'_>, folder: String, pause: bool) -> Result<(), String> {
+    let mut st = state.lock().unwrap();
     open(&mut st)?;
     let s = st.session.as_ref().unwrap();
-    if watch::read_state(&s.dir).alive_at + 120 < now_secs() {
-        watch::gate_now(&s.dir, &cfg, &s.client).map_err(err)?;
-    }
+    watch::set_folder_paused(&s.dir, &s.client, &folder, pause).map_err(err)?;
+    // The session holds a copy of local.json.
+    st.session = None;
+    Ok(())
+}
+
+/// The latest copy progress (`null` until the first reading, a few seconds after start).
+#[tauri::command]
+async fn progress(live: tauri::State<'_, live::Live>) -> Result<Option<setu_core::progress::Snapshot>, String> {
+    Ok(live.0.lock().unwrap_or_else(|e| e.into_inner()).clone())
+}
+
+#[tauri::command]
+async fn set_quiet_progress(state: State<'_>, quiet: bool) -> Result<View, String> {
+    let mut st = state.lock().unwrap();
+    let dir = config_dir();
+    let mut cfg = LocalConfig::load(&dir).map_err(err)?;
+    cfg.quiet_progress = quiet;
+    cfg.save(&dir).map_err(err)?;
+    st.session = None;
     Ok(view(&mut st))
+}
+
+/// Syncthing's speed limits on this computer, in KiB/s (0 = no limit): (download, upload).
+#[tauri::command]
+async fn limits(state: State<'_>) -> Result<(u64, u64), String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    let o = st.session.as_ref().unwrap().client.options().map_err(err)?;
+    Ok((o["maxRecvKbps"].as_u64().unwrap_or(0), o["maxSendKbps"].as_u64().unwrap_or(0)))
+}
+
+#[tauri::command]
+async fn set_limits(state: State<'_>, down: u64, up: u64) -> Result<(u64, u64), String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    let c = &st.session.as_ref().unwrap().client;
+    c.patch_options(&serde_json::json!({ "maxRecvKbps": down, "maxSendKbps": up })).map_err(err)?;
+    Ok((down, up))
+}
+
+/// Show a folder in the file manager: this computer's folder or a folder inside it.
+#[tauri::command]
+async fn open_path(state: State<'_>, path: Option<String>) -> Result<(), String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    let root = st.session.as_ref().unwrap().local.root.clone();
+    let p = path.map(PathBuf::from).unwrap_or_else(|| root.clone());
+    // Only folders Setu looks after.
+    if !p.starts_with(&root) || !p.is_dir() {
+        return Err(format!("{} is not a folder inside {}", p.display(), root.display()));
+    }
+    let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    std::process::Command::new(opener).arg(&p).spawn().map_err(|e| format!("{opener}: {e}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -695,15 +773,173 @@ async fn verify(state: State<'_>, rescan: bool) -> Result<Vec<FolderCheck>, Stri
     st.session.as_ref().unwrap().verify(rescan).map_err(err)
 }
 
+/// What the sync engine is doing (starting, waiting for Tailscale, an old setup to move, …).
+#[tauri::command]
+async fn engine(host: tauri::State<'_, Arc<host::Host>>) -> Result<host::Status, String> {
+    Ok(host.status())
+}
+
+/// The person agreed to move the old, separately running Syncthing into Setu.
+#[tauri::command]
+async fn move_engine(host: tauri::State<'_, Arc<host::Host>>) -> Result<(), String> {
+    host.agree()
+}
+
+/// This Setu's version.
+#[tauri::command]
+fn version() -> &'static str {
+    update::VERSION
+}
+
+/// A newer signed release, or `null` when this one is the newest.
+#[tauri::command]
+async fn check_update() -> Result<Option<update::Update>, String> {
+    tauri::async_runtime::spawn_blocking(update::check).await.map_err(|e| e.to_string())?
+}
+
+/// Download, check and install `version`. Setu quits shortly after and starts again updated.
+#[tauri::command]
+async fn install_update(version: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let u = update::check()?.filter(|u| u.version == version).ok_or("that update is no longer offered")?;
+        update::install(&u)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Look for updates a minute after start, then twice a day. A new version is told once: a
+/// notification, and an `update-available` event for the window.
+fn watch_updates(app: tauri::AppHandle) {
+    use tauri::Emitter;
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        let mut told = None;
+        loop {
+            match update::check() {
+                Ok(Some(u)) if told.as_ref() != Some(&u.version) => {
+                    notify::show(&watch::notice(
+                        "Setu: an update is ready",
+                        format!("Setu {} is out (you have {}). Open Setu to update.", u.version, update::VERSION),
+                    ));
+                    let _ = app.emit("update-available", &u);
+                    told = Some(u.version);
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("setu: update check: {e}"),
+            }
+            std::thread::sleep(std::time::Duration::from_secs(12 * 3600));
+        }
+    });
+}
+
+#[tauri::command]
+async fn autostart() -> Result<bool, String> {
+    Ok(host::autostart::enabled())
+}
+
+#[tauri::command]
+async fn set_autostart(on: bool) -> Result<bool, String> {
+    host::autostart::set(on)?;
+    Ok(host::autostart::enabled())
+}
+
+/// The window opens at its configured size, which can be taller or wider than a small or
+/// scaled screen (a 1366×768 laptop, or 1080p at 150 %). Then the bottom bar and the buttons
+/// on the right are off the screen and cannot be reached. Shrink it to the screen's free area
+/// (without the taskbar or panels) and centre it there.
+fn fit_to_screen(w: &tauri::WebviewWindow) {
+    let monitor = w.current_monitor().ok().flatten().or_else(|| w.primary_monitor().ok().flatten());
+    let (Some(m), Ok(size)) = (monitor, w.outer_size()) else { return };
+    let area = m.work_area();
+    let width = size.width.min(area.size.width * 96 / 100);
+    let height = size.height.min(area.size.height * 94 / 100);
+    if (width, height) != (size.width, size.height) {
+        let _ = w.set_size(tauri::PhysicalSize::new(width, height));
+    }
+    let x = area.position.x + (area.size.width.saturating_sub(width) / 2) as i32;
+    let y = area.position.y + (area.size.height.saturating_sub(height) / 2) as i32;
+    // Not every Linux desktop lets an app place its window (Wayland); the size still fits.
+    let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+/// `setu-app [--background | --quit]`. `--background` (used at sign-in) starts without the
+/// window. `--quit` asks the running Setu to stop (installers use it before replacing files)
+/// and waits up to 15 s for it to be gone.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use setu_core::pipe::{self, Handler};
+    use setu_core::syncthing::Transport;
+
+    if std::env::args().any(|a| a == "--quit") {
+        if let Err(e) = pipe::quit_running() {
+            eprintln!("setu: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // One Setu per user: the pipe is the lock. A second start shows the first one's window.
+    let listener = match pipe::listen() {
+        Ok(Some(l)) => Some(l),
+        Ok(None) => {
+            if let Err(e) = pipe::Pipe.call("show", &serde_json::Value::Null) {
+                eprintln!("setu: another Setu is running but did not answer: {e}");
+            }
+            return;
+        }
+        Err(e) => {
+            eprintln!("setu: {e}; the setu command will not reach this Setu");
+            None
+        }
+    };
+    let background = std::env::args().any(|a| a == "--background");
+    let host = Arc::new(host::Host::default());
+
     tauri::Builder::default()
         .manage(Mutex::new(AppState::default()))
-        .setup(|app| {
+        .manage(live::Live::default())
+        .manage(host.clone())
+        .setup(move |app| {
+            if let Some(w) = app.get_webview_window("main") {
+                fit_to_screen(&w);
+                if !background {
+                    let _ = w.show();
+                }
+            }
             tray::setup(app)?;
+            let handle = app.handle().clone();
+            if let Some(l) = listener {
+                let h = handle.clone();
+                let handler: Handler = Arc::new(move |method, args| match method {
+                    "show" => {
+                        tray::show_main(&h);
+                        Ok(serde_json::Value::Null)
+                    }
+                    "quit" => {
+                        h.exit(0);
+                        Ok(serde_json::Value::Null)
+                    }
+                    _ => setu_engine::call(method, args),
+                });
+                l.serve(handler);
+            }
+            host::start(handle.clone(), host);
+            watch_updates(handle.clone());
+            live::start(handle, app.state::<live::Live>().inner().clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![state, refresh, children, set_rule, set_leave_out, set_pause, discard, plan, apply, init, sign_in, recovery, sign_out, join, check_now, accuracy, differences, tidy_now, tidy_log, undo_tidy, set_allow, resume, conflicts, keep, versions, restore, verify])
-        .run(tauri::generate_context!())
-        .expect("error while running Setu");
+        .invoke_handler(tauri::generate_handler![
+            state, refresh, children, set_rule, set_leave_out, set_pause, pause_folder, progress, set_quiet_progress, limits, set_limits, open_path,
+            discard, plan, apply, init, sign_in, recovery, sign_out, join, check_now, accuracy, differences, tidy_now, tidy_log, undo_tidy, set_allow,
+            resume, conflicts, keep, versions, restore, verify, engine, move_engine, autostart, set_autostart, version, check_update, install_update
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while starting Setu")
+        .run(|_, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Let the engine save its index and close its connections.
+                let _ = setu_engine::stop();
+            }
+        });
 }

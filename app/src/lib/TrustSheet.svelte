@@ -403,8 +403,13 @@
     gap: 4px;
     padding: 12px 16px 0;
     border-bottom: 1px solid var(--line);
+    /* On a narrow window the tabs scroll sideways; the close button stays in view. */
+    overflow-x: auto;
+    scrollbar-width: thin;
   }
   .tabs [role='tab'] {
+    flex: none;
+    white-space: nowrap;
     border: 0;
     background: none;
     color: var(--muted);
@@ -430,8 +435,11 @@
     flex: 1;
   }
   .close {
+    position: sticky;
+    right: 0;
+    flex: none;
     border: 0;
-    background: none;
+    background: var(--surface);
     color: var(--muted);
     font-size: 15px;
     cursor: pointer;

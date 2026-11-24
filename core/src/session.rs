@@ -59,7 +59,7 @@ impl Session {
     pub fn open() -> Result<Session, Error> {
         let dir = config_dir();
         let local = LocalConfig::load(&dir)?;
-        let client = Client::discover(local.syncthing_home.as_deref())?;
+        let client = Client::connect()?;
         let hub = Hub::open(&dir);
         Session::new(dir, local, client, hub)
     }

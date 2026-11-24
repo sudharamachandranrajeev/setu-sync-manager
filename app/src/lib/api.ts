@@ -77,7 +77,76 @@ export interface View {
   leaveOut: LeaveOutEdits
   /** Paused here by the person: until this Unix time, or 0 until resumed. */
   pausedUntil: number | null
+  /** No desktop notifications about copy progress. */
+  quietProgress: boolean
   watch: WatchView | null
+}
+
+/** One direction of copying, now. */
+export interface Flow {
+  active: boolean
+  leftBytes: number
+  leftFiles: number
+  /** Copied in this round so far, half-copied files included. */
+  doneBytes: number
+  doneFiles: number
+  totalBytes: number
+  /** Of this round, 0 to 100. */
+  percent: number
+  /** Bytes a second over the last few seconds. */
+  speed: number
+  /** Bytes a second since the round started. */
+  average: number
+  etaSecs: number | null
+  startedAt: number | null
+  elapsedSecs: number
+}
+
+export interface FolderProgress {
+  id: string
+  name: string
+  path: string
+  folderType: string
+  state: string
+  paused: boolean
+  /** 'you' (this folder), 'safety' (many deletes), 'hold' (whole computer or network). */
+  pausedBy: 'you' | 'safety' | 'hold' | null
+  globalBytes: number
+  globalFiles: number
+  needBytes: number
+  needFiles: number
+  partialBytes: number
+  otherNeedBytes: number
+  otherNeedFiles: number
+  otherCompletion: number | null
+  copying: string[]
+}
+
+export interface Peer {
+  id: string
+  name: string
+  connected: boolean
+  address: string | null
+}
+
+export interface Finished {
+  toHere: boolean
+  bytes: number
+  files: number
+  secs: number
+  at: number
+}
+
+export interface Snapshot {
+  at: number
+  /** To this computer. */
+  down: Flow
+  /** From this computer to the others. */
+  up: Flow
+  folders: FolderProgress[]
+  peers: Peer[]
+  paused: boolean
+  lastDone: Finished | null
 }
 
 export interface LeaveOutEdits {
@@ -225,13 +294,47 @@ export interface Removed {
   undone: boolean
 }
 
+/** What the sync engine inside Setu is doing. */
+export type EngineStatus =
+  | { state: 'starting' }
+  /** No Tailscale address on this computer yet. */
+  | { state: 'tailnet' }
+  /** Syncthing runs on its own here; moving it into Setu waits for the person. */
+  | { state: 'move'; steps: string[]; otherFolders: string[] }
+  | { state: 'moving' }
+  /** `left`: old start-up pieces that could not be removed after a move. */
+  | { state: 'running'; left: string[] }
+  | { state: 'failed'; message: string }
+
+/** A newer signed Setu release. */
+export interface Update {
+  version: string
+  notes: string
+  page: string
+  size: number
+}
+
 export const api = {
+  version: () => invoke<string>('version'),
+  checkUpdate: () => invoke<Update | null>('check_update'),
+  installUpdate: (version: string) => invoke<void>('install_update', { version }),
+  engine: () => invoke<EngineStatus>('engine'),
+  moveEngine: () => invoke<void>('move_engine'),
+  autostart: () => invoke<boolean>('autostart'),
+  setAutostart: (on: boolean) => invoke<boolean>('set_autostart', { on }),
   state: () => invoke<View>('state'),
   refresh: () => invoke<View>('refresh'),
   children: (path: string) => invoke<NodeView[]>('children', { path }),
   setRule: (path: string, dir: boolean, mode: string | null) => invoke<View>('set_rule', { path, dir, mode }),
   setLeaveOut: (list: string[]) => invoke<View>('set_leave_out', { list }),
   setPause: (until: number | null) => invoke<View>('set_pause', { until }),
+  pauseFolder: (folder: string, pause: boolean) => invoke<void>('pause_folder', { folder, pause }),
+  progress: () => invoke<Snapshot | null>('progress'),
+  setQuietProgress: (quiet: boolean) => invoke<View>('set_quiet_progress', { quiet }),
+  /** [download, upload] in KiB/s, 0 = no limit. */
+  limits: () => invoke<[number, number]>('limits'),
+  setLimits: (down: number, up: number) => invoke<[number, number]>('set_limits', { down, up }),
+  openPath: (path: string | null) => invoke<void>('open_path', { path }),
   discard: () => invoke<View>('discard'),
   plan: () => invoke<PlanView>('plan'),
   apply: (guardConfirmed: boolean) => invoke<Report>('apply', { guardConfirmed }),

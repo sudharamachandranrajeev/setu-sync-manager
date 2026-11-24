@@ -1,60 +1,96 @@
 #!/usr/bin/env bash
-# Installs Setu for this user only (no sudo): the programs in ~/.local/bin, a menu entry,
-# and the background helper as a systemd user service that starts at login.
+# Installs Setu for this user only (no sudo): the programs in ~/.local/bin, a menu entry, and
+# an autostart entry so Setu starts (in the background) when you log in. Setu holds its own
+# sync engine, so nothing else needs to run.
 #
-#   ./install.sh               install or update
-#   ./install.sh --no-helper   install without starting the background helper
-#   ./install.sh --uninstall   remove the programs, menu entry and service
+#   ./install.sh                  install or update
+#   ./install.sh --no-autostart   install without starting Setu at login
+#   ./install.sh --uninstall      remove the programs, menu entry and autostart entry
+#   ./install.sh --restart        also start Setu again afterwards (in-app updates use it;
+#                                 can be combined with --no-autostart)
 #
-# Your rules, settings and synced files are never touched.
+# Your rules, settings, this computer's sync identity and your synced files are never touched.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 bin="$HOME/.local/bin"
 apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 icons="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/128x128/apps"
+autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-helper=yes
+doc="${XDG_DATA_HOME:-$HOME/.local/share}/doc/setu"
+start_at_login=yes
+restart=no
 
 have_systemd() { command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; }
 
-case "${1:-}" in
-  --uninstall)
-    if have_systemd; then systemctl --user disable --now setu-watch.service 2>/dev/null || true; fi
-    rm -f "$bin/setu" "$bin/setu-watch" "$bin/setu-app" "$apps/setu.desktop" "$icons/setu.png" "$units/setu-watch.service"
-    if have_systemd; then systemctl --user daemon-reload; fi
-    echo "Setu removed. Your rules and settings are still in ~/.config/setu."
-    exit 0
-    ;;
-  --no-helper) helper=no ;;
-  "") ;;
-  *) echo "unknown option: $1" >&2; exit 2 ;;
-esac
+# Ask a running Setu to quit, so its engine saves its index before the files change. Through
+# `setu quit`: an older setu-app would ignore --quit and open its window.
+stop_setu() {
+  if [[ -x "$bin/setu" ]]; then "$bin/setu" quit >/dev/null 2>&1 || true; fi
+}
 
-for f in setu setu-watch setu-app setu.desktop setu.png setu-watch.service; do
+# The background helper service of 0.1.0-alpha.4 and before; it now runs inside Setu.
+remove_old_helper() {
+  if have_systemd; then systemctl --user disable --now setu-watch.service 2>/dev/null || true; fi
+  rm -f "$bin/setu-watch" "$units/setu-watch.service"
+  if have_systemd; then systemctl --user daemon-reload; fi
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --uninstall)
+      stop_setu
+      remove_old_helper
+      rm -f "$bin/setu" "$bin/setu-app" "$apps/setu.desktop" "$icons/setu.png" "$autostart/setu.desktop"
+      rm -rf "$doc"
+      echo "Setu removed. Your rules and settings are still in ~/.config/setu, and this computer's sync identity in ~/.local/state/setu."
+      exit 0
+      ;;
+    --no-autostart) start_at_login=no ;;
+    --restart) restart=yes ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+
+for f in setu setu-app setu.desktop setu.png LICENSE LICENSE-MPL-2.0 NOTICE; do
   [[ -f "$here/$f" ]] || { echo "missing $f next to install.sh" >&2; exit 1; }
 done
 
-mkdir -p "$bin" "$apps" "$icons"
-install -m 755 "$here/setu" "$here/setu-watch" "$here/setu-app" "$bin/"
+stop_setu
+remove_old_helper
+mkdir -p "$bin" "$apps" "$icons" "$doc"
+install -m 755 "$here/setu" "$here/setu-app" "$bin/"
 install -m 644 "$here/setu.desktop" "$apps/setu.desktop"
 install -m 644 "$here/setu.png" "$icons/setu.png"
-echo "Installed setu, setu-watch and setu-app in $bin."
+install -m 644 "$here/LICENSE" "$here/LICENSE-MPL-2.0" "$here/NOTICE" "$doc/"
+echo "Installed setu and setu-app in $bin."
 
-if [[ $helper == yes ]]; then
-  if have_systemd; then
-    mkdir -p "$units"
-    install -m 644 "$here/setu-watch.service" "$units/setu-watch.service"
-    systemctl --user daemon-reload
-    systemctl --user enable setu-watch.service >/dev/null
-    systemctl --user restart setu-watch.service
-    echo "Background helper running; it starts at every login."
-  else
-    echo "No systemd user session: start $bin/setu-watch at login yourself."
-  fi
+if [[ $start_at_login == yes ]]; then
+  mkdir -p "$autostart"
+  cat > "$autostart/setu.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Setu
+Comment=Keeps your folders in sync between your computers
+Exec="$bin/setu-app" --background
+Icon=setu
+X-GNOME-Autostart-enabled=true
+NoDisplay=true
+EOF
+  echo "Setu starts when you log in (turn it off in Setu's settings)."
+else
+  rm -f "$autostart/setu.desktop"
+fi
+
+if [[ $restart == yes ]]; then
+  nohup "$bin/setu-app" >/dev/null 2>&1 &
+  echo "Setu started again."
+  exit 0
 fi
 
 case ":$PATH:" in
   *":$bin:"*) ;;
   *) echo "Note: $bin is not on your PATH. Add it to run setu from a terminal." ;;
 esac
+echo "Start Setu from your applications menu."

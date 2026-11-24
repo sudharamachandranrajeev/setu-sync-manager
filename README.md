@@ -23,9 +23,9 @@ to go both ways. For example: send all of your laptop's projects to your desktop
 let one or two folders come back. Setu shows both computers' files side by side, lets you set a
 direction on any folder or file, and shows you exactly what will change before anything does.
 
-Setu is **alpha** software. It does not copy files itself: [Syncthing](https://syncthing.net)
-does that, straight from computer to computer over [Tailscale](https://tailscale.com), and Setu
-tells Syncthing what to do. Your computers find each other through your **Brahma account**: you
+Setu is **alpha** software. Files are copied by [Syncthing](https://syncthing.net)'s code, built
+into Setu, straight from computer to computer over [Tailscale](https://tailscale.com). Setu tells
+it what to do. Nothing else needs to be installed or running. Your computers find each other through your **Brahma account**: you
 make your choices once, on any computer, and the others set themselves up. It works with up to
 eight computers.
 
@@ -94,7 +94,6 @@ eight computers.
 
 You need on every computer:
 
-- [Syncthing](https://syncthing.net/downloads/), running.
 - [Tailscale](https://tailscale.com/download), signed in to the same tailnet.
 - A Brahma account on your own Brahma server (see
   [Brahma](https://github.com/sudharamachandranrajeev/brahma-life-suite)). It only holds your
@@ -107,9 +106,14 @@ You need on every computer:
    - **Linux:** unpack `setu-…-linux-x64.tar.gz`, open a terminal in that folder and run
      `./install.sh`. It installs for you only (no `sudo`) and adds Setu to the app menu.
 
-   Both start Setu's small background helper at sign-in. It sets up new choices, pairs your
-   computers, checks the copies, pauses syncing on a metered network, stops mass deletions and
-   shows notifications. Keep it on: without it, the other steps wait until you open Setu.
+   Both start Setu at sign-in, in the background. Setu syncs only while it runs: it copies the
+   files, sets up new choices, pairs your computers, checks the copies, pauses syncing on a
+   metered network, stops mass deletions and shows notifications. Closing the window keeps it
+   running in the tray; **Quit Setu** in the tray stops it.
+
+   Used Syncthing before, or an earlier Setu? On first start Setu offers to move that setup
+   inside. This computer keeps its Syncthing identity, so your other computers keep syncing with
+   it. Nothing is removed until the move has been checked.
 2. **Open Setu and pick the folder to manage** (for example `/home/you/Work` or `C:\Work`).
 3. **Sign in** with your Brahma server address, email and password.
 4. **Say how this computer takes part:** *Keep the same files as my other computers*, or *Backup
@@ -122,7 +126,62 @@ You need on every computer:
    check it there. The bottom bar shows the progress.
 
 Prefer the terminal? `setu sign-in <server> <email>`, `setu join`, `setu rule …` and
-`setu apply` do the same (`setu help` lists everything).
+`setu apply` do the same (`setu help` lists everything). They talk to the running Setu.
+
+## ⬆️ Updating
+
+### From 0.1.0-alpha.5 onwards: inside Setu
+
+Setu checks for a new version twice a day. When one is out, you get a notification, and Setu
+shows **Setu X is available** at the top of its window. Press **Update now**. Setu downloads
+the new version, checks its signature, closes for a moment and starts again. You can also go to
+the settings pane on the right, under **Updates**, and press **Check for updates**.
+
+Your rules, settings, this computer's sync identity and your files are kept. Setu installs only
+downloads signed with its release key. If the signature does not match, it installs nothing
+and tells you.
+
+### From 0.1.0-alpha.4 or older: once, by hand
+
+Those versions have no updater, and Syncthing still ran as its own program. Do this once on
+each computer. Your computers keep syncing with each other while you go through them one by one.
+
+1. **Make sure Tailscale is running** and signed in on that computer.
+2. **Install the new version over the old one.** Get it from the
+   [Releases page](https://github.com/sudharamachandranrajeev/setu-sync-manager/releases).
+   - **Windows:** run `Setu-…-windows-x64-setup.exe`. It stops the old background helper and
+     removes `setu-watch.exe` and its "Setu helper" sign-in entry. Then it installs the new Setu.
+   - **Linux:** unpack `setu-…-linux-x64.tar.gz`, open a terminal in that folder and run
+     `./install.sh`. It stops and removes the old `setu-watch` service, then installs the new
+     Setu and its login entry.
+3. **Open Setu.** It shows **Move Syncthing into Setu** with every step it will take. Read the
+   steps, then press **Move it into Setu**. Setu then:
+   - stops the separately running Syncthing;
+   - copies its identity, settings and file index into Setu (`%LOCALAPPDATA%\Setu\engine` or
+     `~/.local/state/setu/engine`), so this computer keeps its device ID and needs no
+     re-pairing;
+   - starts its own engine and checks it has the same identity and every Setu folder;
+   - only then removes the old start-up pieces: on Windows the "Syncthing (Setu)" scheduled
+     task, the start script and the GUI password file; on Linux the login services.
+
+   If any check fails, Setu removes its copy, starts the old Syncthing again and says why.
+   Nothing is lost.
+4. **Check it worked.** After a minute your other computers show as connected in Setu, and
+   `setu status` in a terminal answers.
+5. **Afterwards, if you like:** the old Syncthing folder (`%LOCALAPPDATA%\Syncthing` or
+   `~/.local/state/syncthing`) and any separately installed Syncthing program are left alone.
+   Remove them once you have seen a few days of good syncing. On Windows:
+   `winget uninstall Syncthing.Syncthing`.
+
+> [!IMPORTANT]
+> The move screen lists any Syncthing folders that are **not** Setu's. Once Syncthing runs only
+> inside Setu, those folders stop syncing on that computer. Move them into your Setu folder
+> first, or keep a separate Syncthing for them. Be aware that two Syncthings cannot both
+> listen on port 22000.
+
+From this version on, Setu itself must be running for anything to sync, and for the `setu`
+command to work. It starts at sign-in by default. Closing the window keeps it in the tray, and
+**Quit Setu** stops it.
 
 ## 🧩 How it works
 
@@ -221,25 +280,36 @@ that does everything the window does.
 | Folder | What is in it |
 | --- | --- |
 | `core/` | Rules, the compiler that turns rules into Syncthing folders and ignore lists, planning and applying, the Brahma link (`hub.rs`), pairing (`mesh.rs`), content checks (`accuracy.rs`) and duplicate removal (`tidy.rs`) |
-| `cli/` | The `setu` command and `setu-watch`, the background helper |
-| `app/` | The window: Svelte front end in `src/`, Tauri back end in `src-tauri/` |
+| `engine/` | The sync engine: Syncthing v2.1.7 as a Go library (`go/`, MPL-2.0), built with cgo into a static library and called directly from Rust. No REST API, no local port |
+| `cli/` | The `setu` command. It talks to the running Setu over a local pipe that only you can open |
+| `app/` | Setu itself: window and tray, and the host of the engine and the background helper. Svelte front end in `src/`, Tauri back end in `src-tauri/` |
 | `packaging/` | The Linux download (`linux/package.sh`) and the Windows installer (`windows/setu.iss`, Inno Setup) |
 
+Building needs, besides Rust and Node: **Go** (the version in `engine/go/go.mod`) and a C
+compiler for cgo. On Linux that is the usual `gcc`. On Windows it is
+[llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (see `.github/llvm-mingw.ps1`). Point
+`SETU_GO` and `SETU_CGO_CC` at them, or unpack both into a `.tools` folder next to this
+repository (`engine/build.rs` explains).
+
 ```sh
-cargo test -p setu-core                         # fast tests
-cargo test -p setu-core -- --ignored            # real Syncthings and a Brahma server on this computer
-cargo run -p setu-cli -- status                 # the command-line tool
-cd app && npm ci && npx tauri build --no-bundle # the window
+cargo test -p setu-core                         # fast tests, no Go needed
+cargo test --workspace                          # everything, including the engine
+cargo test -p setu-engine -- --ignored          # two engines and a Brahma server on this computer
+cargo run -p setu-cli -- status                 # the command-line tool (Setu must be running)
+cd app && npm ci && npx tauri build --no-bundle # Setu
 ```
 
-The slow tests start their own Syncthing instances with temporary folders and ports, and a
-throwaway Brahma server on loopback (Node 24+, from a `brahma-life-suite` checkout next to this
-one, or set `BRAHMA_SERVER_TS` to its `server/src/home.ts`). They never touch the Syncthing you
-use. The Brahma sync client is the `brahma-sync` crate from brahma core (`sync-rs/`).
+The slow tests run each engine in its own process, with temporary folders and loopback ports,
+and a throwaway Brahma server on loopback. That needs Node 24+ and a `brahma-life-suite`
+checkout next to this one, or `BRAHMA_SERVER_TS` set to its `server/src/home.ts`. They never
+touch the Setu you use. The Brahma sync client is the `brahma-sync` crate from brahma core
+(`sync-rs/`).
 
 A tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds both downloads and
 publishes a GitHub release.
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+Setu is MIT; see [LICENSE](LICENSE). The sync engine is Syncthing's code and Setu's Go code that
+drives it, both MPL-2.0. See [engine/LICENSE-MPL-2.0](engine/LICENSE-MPL-2.0) and
+[engine/NOTICE](engine/NOTICE), which says where to get the source.

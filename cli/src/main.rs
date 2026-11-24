@@ -13,10 +13,9 @@ use setu_core::session::Session;
 use setu_core::watch;
 use setu_core::Error;
 
-mod notify;
-
 const USAGE: &str = "\
 setu: choose what syncs between your computers, and which way.
+Most commands talk to the running Setu app, which holds the sync engine.
 
   setu init --root <folder>          Set this computer's folder (once)
   setu sign-in <server> <email>      Sign in to your Brahma account (asks for the password).
@@ -43,12 +42,16 @@ setu: choose what syncs between your computers, and which way.
                                      need a second yes (or --accept-replacements)
   setu discard                       Drop the draft
   setu index                         Write this computer's file list for the other one
-  setu watch                         Run the background helper (network gate, delete guard)
   setu allow metered|relay on|off    Let Setu's folders sync on a metered network or relay
   setu resume <folder-id>            Resume a folder the delete guard paused
   setu pause [<minutes>]             Pause syncing on this computer (for a while, or until
                                      `setu unpause`)
   setu unpause                       Resume syncing after `setu pause`
+  setu pause-folder <folder-id>      Pause one synced folder here (see `setu progress`)
+  setu resume-folder <folder-id>     Resume a folder paused with `setu pause-folder`
+  setu progress [--watch]            What is copying: %, speed, time so far, time left,
+                                     per folder (--watch: keep showing it)
+  setu progress-notices on|off       Desktop notifications about copy progress
   setu leave-out [add|remove <name>] Show or change the names always left out, such as
                                      *.iso or videos (goes into the draft)
   setu conflicts                     List conflict copies in synced folders
@@ -59,6 +62,8 @@ setu: choose what syncs between your computers, and which way.
   setu restore <folder-id> <path> <version-time>
                                      Put an old version back
   setu verify [--rescan]             Check every synced folder is complete and error-free
+  setu quit                          Stop the running Setu (the sync engine stops too)
+  setu version                       Show Setu's version
 ";
 
 fn main() -> ExitCode {
@@ -258,20 +263,22 @@ fn run(args: &[String]) -> Result<(), Error> {
             println!("Draft dropped.");
             Ok(())
         }
+        "quit" => {
+            if setu_core::pipe::quit_running()? {
+                println!("Setu stopped.");
+            } else {
+                println!("Setu was not running.");
+            }
+            Ok(())
+        }
+        "version" | "--version" => {
+            println!("setu {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "index" => {
             let n = Session::open()?.scan_here()?.len();
             println!("File list written: {n} entries.");
             Ok(())
-        }
-        "watch" => {
-            let dir = config_dir();
-            let cfg = LocalConfig::load(&dir)?;
-            let client = setu_core::syncthing::Client::discover(cfg.syncthing_home.as_deref())?;
-            println!("Setu is watching. Ctrl+C stops it.");
-            watch::run(&dir, || LocalConfig::load(&config_dir()), &client, &|n| {
-                println!("{}: {}", n.title, n.body);
-                notify::show(n);
-            })
         }
         "allow" => {
             let dir = config_dir();
@@ -287,7 +294,7 @@ fn run(args: &[String]) -> Result<(), Error> {
                 _ => return Err(Error::Setup("usage: setu allow metered|relay on|off".into())),
             }
             cfg.save(&dir)?;
-            println!("Saved. `setu watch` uses it within a minute.");
+            println!("Saved. Setu uses it within a minute.");
             Ok(())
         }
         "pause" | "unpause" => {
@@ -348,6 +355,27 @@ fn run(args: &[String]) -> Result<(), Error> {
             println!("Resumed {id}.");
             Ok(())
         }
+        "pause-folder" | "resume-folder" => {
+            let pause = args[0] == "pause-folder";
+            let id = args.get(1).ok_or_else(|| Error::Setup(format!("usage: setu {} <folder-id>", args[0])))?;
+            let s = Session::open()?;
+            watch::set_folder_paused(&s.dir, &s.client, id, pause)?;
+            println!("{} {id}.", if pause { "Paused" } else { "Resumed" });
+            Ok(())
+        }
+        "progress-notices" => {
+            let dir = config_dir();
+            let mut cfg = LocalConfig::load(&dir)?;
+            cfg.quiet_progress = match args.get(1).map(String::as_str) {
+                Some("on") => false,
+                Some("off") => true,
+                _ => return Err(Error::Setup("usage: setu progress-notices on|off".into())),
+            };
+            cfg.save(&dir)?;
+            println!("Saved. Setu uses it at its next reading.");
+            Ok(())
+        }
+        "progress" => progress(&Session::open()?, args.iter().any(|a| a == "--watch")),
         "conflicts" => {
             let s = Session::open()?;
             let here = Tree::new(setu_core::index::scan(&s.local.root, &s.working()?.always_ignore)?);
@@ -591,6 +619,57 @@ fn print_plan(plan: &Plan) {
     }
 }
 
+/// Copy progress. The speed needs two readings, so the first line comes after two seconds.
+fn progress(s: &Session, keep: bool) -> Result<(), Error> {
+    use setu_core::progress::{self, bytes, duration, Flow, Meter};
+    let mut meter = Meter::default();
+    let hold = || !watch::read_state(&s.dir).gate.open || s.local.user_paused(setu_core::control::now_secs());
+    meter.observe(progress::read(&s.client, &s.ctx.me, watch::now_ms())?, hold());
+    let line = |what: &str, f: &Flow| {
+        if !f.active {
+            return format!("{what}: nothing to copy");
+        }
+        let eta = f.eta_secs.map_or("working out".to_string(), duration);
+        format!(
+            "{what}: {:.1}% · {} of {} · {} files left · {}/s (average {}/s) · {} so far · {eta} left",
+            f.percent,
+            bytes(f.done_bytes),
+            bytes(f.total_bytes),
+            f.left_files,
+            bytes(f.speed),
+            bytes(f.average),
+            duration(f.elapsed_secs)
+        )
+    };
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let (mut snap, _) = meter.observe(progress::read(&s.client, &s.ctx.me, watch::now_ms())?, hold());
+        progress::mark_pauses(&mut snap, &watch::read_state(&s.dir), &s.local);
+        if keep {
+            print!("\x1b[2J\x1b[H");
+        }
+        if snap.paused {
+            println!("On hold on this computer: copying waits.");
+        }
+        println!("{}", line("To this computer", &snap.down));
+        println!("{}", line("To the others", &snap.up));
+        for p in &snap.peers {
+            println!("  {} {}", p.name, if p.connected { "connected" } else { "offline" });
+        }
+        for f in &snap.folders {
+            let here = if f.global_bytes == 0 { 100.0 } else { (f.global_bytes - f.need_bytes.min(f.global_bytes)) as f64 * 100.0 / f.global_bytes as f64 };
+            let paused = f.paused_by.as_deref().map(|b| format!(" (paused: {b})")).unwrap_or_default();
+            println!("  {}  {}  {}  here {here:.1}%{}{paused}", f.id, f.name, f.state, f.other_completion.map(|c| format!(", others {c:.1}%")).unwrap_or_default());
+            for c in &f.copying {
+                println!("      copying {c}");
+            }
+        }
+        if !keep {
+            return Ok(());
+        }
+    }
+}
+
 fn status(s: &Session) -> Result<(), Error> {
     println!("This computer: {} ({})", short_id(&s.ctx.me), s.local.root.display());
     println!("Control folder: {}", s.control.dir.display());
@@ -629,7 +708,7 @@ fn status(s: &Session) -> Result<(), Error> {
     }
     let w = watch::read_state(&s.dir);
     if w.alive_at + 120 < setu_core::control::now_secs() {
-        println!("Background helper: not running (`setu watch`).");
+        println!("Background helper: not running (it runs inside Setu; is Setu still starting?).");
     } else if w.gate.open {
         println!("Background helper: running; network fine.");
     } else {

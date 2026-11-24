@@ -1,13 +1,12 @@
-//! End to end through Brahma: two real Syncthings that have never met, and a throwaway Brahma
+//! End to end through Brahma: two built-in engines that have never met, and a throwaway Brahma
 //! sync server, all on loopback. Both computers sign in to one account; the rules saved on one
 //! reach the other through the server, the helpers pair the Syncthings and apply the rules by
 //! themselves, the content check agrees, and an identical conflict copy is tidied away.
 //!
-//! Needs `syncthing` and Node 24+ with brahma's server (see `common::server_script`). Ignored by
-//! default: `cargo test -p setu-core --test brahma_link -- --ignored`.
+//! Needs Node 24+ with brahma's server (see `common::server_script`). Ignored by default:
+//! `cargo test -p setu-engine --test brahma_link -- --ignored`.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use brahma_sync::MemorySecretStore;
 use serde_json::json;
@@ -21,11 +20,11 @@ use setu_core::syncthing::Client;
 mod common;
 use common::*;
 
-fn session(dir: &Path, home: &Path, root: &Path) -> Session {
+fn session(dir: &Path, client: &Client, root: &Path) -> Session {
     let cfg = dir.join("cfg");
     let local = LocalConfig { root: root.to_path_buf(), allow_metered: true, allow_relay: true, ..Default::default() };
     let hub = Hub::with_secrets(&cfg, MemorySecretStore::default());
-    Session::new(cfg, local, Client::discover(Some(home)).unwrap(), hub).unwrap()
+    Session::new(cfg, local, client.clone(), hub).unwrap()
 }
 
 /// One helper round, as `helper::Ticker` does it.
@@ -47,10 +46,6 @@ fn applied(s: &Session, id: &str) -> u64 {
 #[test]
 #[ignore]
 fn computers_join_and_follow_the_rules_through_brahma() {
-    if Command::new("syncthing").arg("--version").output().is_err() {
-        eprintln!("syncthing not installed; skipping");
-        return;
-    }
     let Some(script) = server_script() else {
         eprintln!("Node 24+ or brahma's server not found (set BRAHMA_SERVER_TS); skipping");
         return;
@@ -73,8 +68,8 @@ fn computers_join_and_follow_the_rules_through_brahma() {
     put(&ra, "pub/doc.txt", "published by A");
     put(&ra, "private/p.txt", "stays on A");
 
-    let sa = session(&da, &da.join("home"), &ra);
-    let sb = session(&db, &db.join("home"), &rb);
+    let sa = session(&da, &a.client, &ra);
+    let sb = session(&db, &b.client, &rb);
     sa.hub.sign_up(&server.url, "person@example.com", "correct horse battery staple", &server.setup).unwrap();
     sb.hub.sign_in(&server.url, "person@example.com", "correct horse battery staple").unwrap();
     assert!(sa.hub.signed_in() && sb.hub.signed_in());

@@ -1,12 +1,21 @@
-//! Helpers shared by the end-to-end tests: real Syncthings on loopback with their own homes.
+//! Helpers shared by the end-to-end tests: built-in engines on loopback, each in its own process
+//! (the engine runs once per process) with its own home.
+//!
+//! A test starts an engine by running its own test binary again with only `common::host`
+//! selected and `SETU_E2E_HOST` set. That copy starts the engine and answers Setu's call
+//! protocol (`setu_core::pipe::answer`) on a loopback port, as the running Setu does on its pipe.
 #![allow(dead_code)]
 
-use std::net::TcpListener;
-use std::path::Path;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use setu_core::syncthing::Client;
+use serde_json::{Value, json};
+use setu_core::Error;
+use setu_core::syncthing::{Client, Transport};
 
 pub struct St {
     pub child: Child,
@@ -26,53 +35,58 @@ pub fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
-pub fn start(dir: &Path) -> St {
-    let home = dir.join("home");
-    let ok = Command::new("syncthing")
-        .args(["generate", &format!("--home={}", home.display()), "--no-port-probing"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("syncthing runs");
-    assert!(ok.success());
-    let (gui, listen) = (free_port(), free_port());
-    let cfg = home.join("config.xml");
-    let mut x = std::fs::read_to_string(&cfg).unwrap();
-    for (from, to) in [
-        ("<listenAddress>default</listenAddress>".to_string(), format!("<listenAddress>tcp://127.0.0.1:{listen}</listenAddress>")),
-        ("<globalAnnounceEnabled>true</globalAnnounceEnabled>".into(), "<globalAnnounceEnabled>false</globalAnnounceEnabled>".into()),
-        ("<localAnnounceEnabled>true</localAnnounceEnabled>".into(), "<localAnnounceEnabled>false</localAnnounceEnabled>".into()),
-        ("<relaysEnabled>true</relaysEnabled>".into(), "<relaysEnabled>false</relaysEnabled>".into()),
-        ("<natEnabled>true</natEnabled>".into(), "<natEnabled>false</natEnabled>".into()),
-        ("<startBrowser>true</startBrowser>".into(), "<startBrowser>false</startBrowser>".into()),
-        ("<crashReportingEnabled>true</crashReportingEnabled>".into(), "<crashReportingEnabled>false</crashReportingEnabled>".into()),
-        ("<urAccepted>0</urAccepted>".into(), "<urAccepted>-1</urAccepted>".into()),
-    ] {
-        x = x.replace(&from, &to);
+/// Calls to an engine host on a loopback port, one connection per call (as `pipe::Pipe`).
+struct Tcp(u16);
+
+impl Transport for Tcp {
+    fn call(&self, method: &str, args: &Value) -> Result<Value, Error> {
+        let s = TcpStream::connect(("127.0.0.1", self.0)).map_err(|e| Error::Setup(e.to_string()))?;
+        (&s).write_all(format!("{}\n", json!({ "method": method, "args": args })).as_bytes()).map_err(|e| Error::Setup(e.to_string()))?;
+        let mut line = String::new();
+        BufReader::new(&s).read_line(&mut line).map_err(|e| Error::Setup(e.to_string()))?;
+        let mut v: Value = serde_json::from_str(&line).map_err(|e| Error::Setup(format!("{e}: {line:?}")))?;
+        match v.get_mut("err").map(Value::take) {
+            Some(Value::String(e)) => Err(Error::Syncthing(e)),
+            _ => Ok(v.get_mut("ok").map(Value::take).unwrap_or(Value::Null)),
+        }
     }
-    x = regex_replace_gui(&x, gui);
-    std::fs::write(&cfg, x).unwrap();
-    let log = std::fs::File::create(dir.join("syncthing.log")).unwrap();
-    let child = Command::new("syncthing")
-        .args(["serve", &format!("--home={}", home.display()), "--no-browser", "--no-restart"])
-        .env("STNODEFAULTFOLDER", "1")
-        .env("STNOUPGRADE", "1")
-        .env_remove("STHOMEDIR")
+}
+
+/// The engine host: does nothing in a normal test run.
+#[test]
+fn host() {
+    let Some(dir) = std::env::var_os("SETU_E2E_HOST").map(PathBuf::from) else { return };
+    let listen = std::env::var("SETU_E2E_LISTEN").unwrap();
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    setu_engine::start(&setu_engine::StartArgs { home: dir.join("home"), listen: vec![listen], name }).unwrap();
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::fs::write(dir.join("port.tmp"), port.to_string()).unwrap();
+    std::fs::rename(dir.join("port.tmp"), dir.join("port")).unwrap();
+    let handler: setu_core::pipe::Handler = Arc::new(setu_engine::call);
+    for s in l.incoming().flatten() {
+        let h = handler.clone();
+        std::thread::spawn(move || setu_core::pipe::answer(&s, &s, &h));
+    }
+}
+
+pub fn start(dir: &Path) -> St {
+    std::fs::create_dir_all(dir).unwrap();
+    let listen = free_port();
+    let log = std::fs::File::create(dir.join("host.log")).unwrap();
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "common::host", "--nocapture", "--test-threads=1"])
+        .env("SETU_E2E_HOST", dir)
+        .env("SETU_E2E_LISTEN", format!("tcp://127.0.0.1:{listen}"))
+        .stdin(Stdio::null())
         .stdout(log.try_clone().unwrap())
         .stderr(log)
         .spawn()
         .unwrap();
-    let client = Client::discover(Some(&home)).unwrap();
-    let id = wait_for(60, || client.my_id().ok()).expect("syncthing REST comes up");
+    let port: u16 = wait_for(60, || std::fs::read_to_string(dir.join("port")).ok()?.parse().ok()).expect("engine host comes up");
+    let client = Client::with(Arc::new(Tcp(port)));
+    let id = client.my_id().unwrap();
     St { child, client, id, listen }
-}
-
-/// Point the GUI at our own port (the generated config uses 127.0.0.1:8384).
-pub fn regex_replace_gui(x: &str, port: u16) -> String {
-    let start = x.find("<gui ").expect("gui section");
-    let a = x[start..].find("<address>").unwrap() + start + "<address>".len();
-    let b = x[a..].find("</address>").unwrap() + a;
-    format!("{}127.0.0.1:{port}{}", &x[..a], &x[b..])
 }
 
 pub fn wait_for<T>(secs: u64, mut f: impl FnMut() -> Option<T>) -> Option<T> {

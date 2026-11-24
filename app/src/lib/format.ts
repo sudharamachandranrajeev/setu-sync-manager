@@ -77,6 +77,31 @@ export function bytes(n: number): string {
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${u[i]}`
 }
 
+/** `42 s`, `3 min 12 s`, `2 h 05 min`. */
+export function duration(secs: number): string {
+  secs = Math.max(0, Math.round(secs))
+  if (secs < 60) return `${secs} s`
+  if (secs < 3600) return `${Math.floor(secs / 60)} min ${String(secs % 60).padStart(2, '0')} s`
+  return `${Math.floor(secs / 3600)} h ${String(Math.floor((secs % 3600) / 60)).padStart(2, '0')} min`
+}
+
+/** Bytes a second, e.g. `12 MB/s`. */
+export function rate(n: number): string {
+  return `${bytes(n)}/s`
+}
+
+/** A clock time for a Unix time, with the day when it is not today: `14:32`, `tomorrow 07:00`. */
+export function clock(unix: number): string {
+  const d = new Date(unix * 1000)
+  const t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const today = new Date()
+  if (d.toDateString() === today.toDateString()) return t
+  const tomorrow = new Date(today)
+  tomorrow.setDate(today.getDate() + 1)
+  if (d.toDateString() === tomorrow.toDateString()) return `tomorrow ${t}`
+  return `${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${t}`
+}
+
 export function ago(secs: number | null): string {
   if (secs === null) return 'never'
   if (secs < 90) return 'just now'

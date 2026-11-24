@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["core", "cli", "app/src-tauri"]
+members = ["core", "cli", "engine", "app/src-tauri"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.5"
 edition = "2024"
 license = "MIT"

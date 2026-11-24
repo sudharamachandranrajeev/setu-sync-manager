@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use crate::control::now_secs;
 use crate::mesh;
 use crate::session::{Auto, Session};
-use crate::watch::Notice;
+use crate::watch::{notice, Notice};
 
 pub const HUB_EVERY: Duration = Duration::from_secs(60);
 /// How often the content check and tidy run by themselves.
@@ -28,10 +28,6 @@ impl Default for Ticker {
         // The first content check waits ten minutes, so starting up stays light.
         Ticker { next_hub: Instant::now(), next_check: Instant::now() + Duration::from_secs(600), held_told: None, failures: 0 }
     }
-}
-
-fn notice(title: &str, body: String) -> Notice {
-    Notice { title: title.into(), body }
 }
 
 impl Ticker {

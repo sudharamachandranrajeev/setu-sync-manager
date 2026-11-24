@@ -26,6 +26,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # The sync engine (engine/go) is Go built with cgo.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go/go.mod
+          cache-dependency-path: engine/go/go.sum
+      - name: Engine C compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/llvm-mingw.ps1
       - name: Linux libraries
         if: runner.os == 'Linux'
         run: |
@@ -40,3 +49,5 @@ jobs:
           npm run build
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Two engines, end to end
+        run: cargo test -p setu-engine --test two_engines --locked -- --ignored

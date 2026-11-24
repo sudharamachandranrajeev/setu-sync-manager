@@ -22,6 +22,10 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go/go.mod
+          cache-dependency-path: engine/go/go.sum
       - run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev
@@ -31,12 +35,30 @@ jobs:
         shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          [[ $GITHUB_REF == refs/tags/v* ]] && version=${GITHUB_REF#refs/tags/v}
+          if [[ $GITHUB_REF == refs/tags/v* && ${GITHUB_REF#refs/tags/v} != "$version" ]]; then
+            echo "tag ${GITHUB_REF#refs/tags/} does not match Cargo.toml version $version (in-app updates compare them)" >&2
+            exit 1
+          fi
           packaging/linux/package.sh "$version"
+      # In-app updates install only downloads signed with this key (app/src-tauri/update-key.pub).
+      - name: Sign
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: app
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        # Without the secrets the release is signed by hand afterwards (see RELEASING.md).
+        run: |
+          if [[ -z $TAURI_SIGNING_PRIVATE_KEY ]]; then echo "::warning::no signing key; sign the release by hand"; exit 0; fi
+          for f in ../target/package/*.tar.gz; do npx tauri signer sign "$f"; done
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: target/package/*.tar.gz*
+          path: |
+            target/package/*.tar.gz
+            target/package/*.tar.gz.sha256
+            target/package/*.tar.gz.sig
           if-no-files-found: error
 
   windows:
@@ -49,6 +71,13 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go/go.mod
+          cache-dependency-path: engine/go/go.sum
+      - name: Engine C compiler
+        shell: pwsh
+        run: ./.github/llvm-mingw.ps1
       - name: Build
         run: |
           cargo build --release --locked -p setu-cli
@@ -66,6 +95,16 @@ jobs:
           }
           iscc /Qp /DAppVersion=$version packaging\windows\setu.iss
           Get-ChildItem target\package\*.exe | ForEach-Object { (Get-FileHash $_ -Algorithm SHA256).Hash.ToLower() + "  " + $_.Name | Out-File -Encoding ascii "$($_.FullName).sha256" }
+      - name: Sign
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: app
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { echo "::warning::no signing key; sign the release by hand"; exit 0 }
+          Get-ChildItem ..\target\package\*.exe | ForEach-Object { npx tauri signer sign $_.FullName; if ($LASTEXITCODE) { exit 1 } }
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -90,4 +129,4 @@ jobs:
           tag=${GITHUB_REF#refs/tags/}
           pre=""
           [[ $tag == v0.* || $tag == *-* ]] && pre="--prerelease"
-          gh release create "$tag" out/* --repo "$GITHUB_REPOSITORY" --title "Setu $tag" $pre --notes "Linux: unpack the .tar.gz and run ./install.sh. Windows: run the setup .exe. Neither is code-signed yet, so Windows SmartScreen warns the first time (More info, Run anyway). Check a download with its .sha256 file."
+          gh release create "$tag" out/* --repo "$GITHUB_REPOSITORY" --title "Setu $tag" $pre --notes "Linux: unpack the .tar.gz and run ./install.sh. Windows: run the setup .exe. Setu now carries its own sync engine (Syncthing's code, MPL-2.0); on first start it offers to move an existing Syncthing setup into Setu, keeping this computer's identity. Neither is code-signed yet, so Windows SmartScreen warns the first time (More info, Run anyway). Check a download with its .sha256 file."

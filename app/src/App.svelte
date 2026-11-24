@@ -1,14 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { listen } from '@tauri-apps/api/event'
-  import { api, type FolderCheck, type NodeView, type PlanView, type Report, type View } from './lib/api'
+  import { api, type EngineStatus, type Update, type Flow, type FolderCheck, type NodeView, type PlanView, type Report, type Snapshot, type View } from './lib/api'
   import DirPicker from './lib/DirPicker.svelte'
   import FirstSync from './lib/FirstSync.svelte'
   import LeaveOut from './lib/LeaveOut.svelte'
   import PlanSheet from './lib/PlanSheet.svelte'
+  import ProgressSheet, { pauseChoices, type PauseHow } from './lib/ProgressSheet.svelte'
   import TrustSheet, { type TrustTab } from './lib/TrustSheet.svelte'
   import Tree, { type Row } from './lib/Tree.svelte'
-  import { ago, bytes, called, deviceState, dirOf, modeOf, sentence, shortLabel, type Dir } from './lib/format'
+  import { ago, bytes, called, clock, deviceState, dirOf, duration, modeOf, rate, sentence, shortLabel, type Dir } from './lib/format'
 
   let view = $state<View | null>(null)
   let rows = $state<Row[]>([])
@@ -29,6 +30,23 @@
   let trust = $state<TrustTab | null>(null)
   let checks = $state<FolderCheck[] | null>(null)
   let pauseMenu = $state(false)
+  let moreMenu = $state(false)
+  /** Copy progress, sent by Setu every few seconds. */
+  let snap = $state<Snapshot | null>(null)
+  let showProgress = $state(false)
+  /** Speed limits here in KB/s, 0 = none: [download, upload]. */
+  let limits = $state<[number, number] | null>(null)
+  /** The sync engine inside Setu. Until it runs, the window explains what it waits for. */
+  let engine = $state<EngineStatus>({ state: 'starting' })
+  /** Old start-up pieces that could not be removed: dismissed. */
+  let leftSeen = $state(false)
+  let autoStart = $state<boolean | null>(null)
+  /** This Setu's version, and a newer release when there is one. */
+  let version = $state('')
+  let update = $state<Update | null>(null)
+  let updateLater = $state(false)
+  /** 'idle', 'checking', 'none' (up to date), 'installing'. */
+  let updateStep = $state<'idle' | 'checking' | 'none' | 'installing'>('idle')
 
   const me = $derived(view?.me ?? null)
   const other = $derived(view?.other ?? null)
@@ -67,8 +85,12 @@
 
   async function boot(v: View) {
     view = v
-    error = v.message
-    if (v.stage === 'ready') await reloadOpen()
+    // Until the engine runs, the engine card says why; its "not running" errors add nothing.
+    error = engine.state === 'running' ? v.message : null
+    if (v.stage === 'ready') {
+      await reloadOpen()
+      if (!limits) api.limits().then((l) => (limits = l), () => {})
+    }
   }
 
   /** Copy progress, read from Syncthing every few seconds. */
@@ -81,19 +103,48 @@
     }
   }
 
+  function onEngine(e: EngineStatus) {
+    const was = engine.state
+    engine = e
+    if (e.state === 'running' && was !== 'running') api.refresh().then(boot).catch(fail)
+  }
+
   onMount(() => {
+    api.engine().then(onEngine, fail)
     api.state().then(boot).catch(fail)
+    api.autostart().then((on) => (autoStart = on), () => {})
+    api.version().then((v) => (version = v), () => {})
     const timer = setInterval(poll, 8000)
     setTimeout(poll, 1500)
+    api.progress().then((s) => (snap = s ?? snap), () => {})
     // The tray menu opens a sheet directly.
-    const off = listen<TrustTab>('open-trust', (e) => {
-      plan = null
-      guide = false
-      trust = e.payload
-    })
+    const offs = [
+      listen<TrustTab>('open-trust', (e) => {
+        plan = null
+        guide = false
+        showProgress = false
+        trust = e.payload
+      }),
+      listen('open-progress', () => {
+        plan = null
+        guide = false
+        trust = null
+        showProgress = true
+      }),
+      listen<Snapshot>('progress', (e) => (snap = e.payload)),
+      listen<EngineStatus>('engine-changed', (e) => onEngine(e.payload)),
+      listen<Update>('update-available', (e) => {
+        update = e.payload
+        updateLater = false
+      }),
+      // Paused or resumed from the tray.
+      listen('view-changed', () => {
+        api.refresh().then((v) => (view = v), fail)
+      }),
+    ]
     return () => {
       clearInterval(timer)
-      off.then((f) => f())
+      for (const off of offs) off.then((f) => f())
     }
   })
 
@@ -281,11 +332,13 @@
   }
 
   /** Pause for some minutes, until tomorrow 7:00, until resumed (0), or resume (null). */
-  async function pause(how: 'hour' | 'tomorrow' | 'manual' | null) {
+  async function pause(how: PauseHow | null) {
     pauseMenu = false
     const now = Math.floor(Date.now() / 1000)
     let until: number | null = null
-    if (how === 'hour') until = now + 3600
+    if (how === 'm15') until = now + 15 * 60
+    else if (how === 'hour') until = now + 3600
+    else if (how === 'h3') until = now + 3 * 3600
     else if (how === 'manual') until = 0
     else if (how === 'tomorrow') {
       const t = new Date()
@@ -306,9 +359,107 @@
     const u = view?.pausedUntil
     if (u === null || u === undefined) return null
     if (u === 0) return 'until you resume it'
-    const d = new Date(u * 1000)
-    const sameDay = d.toDateString() === new Date().toDateString()
-    return `until ${sameDay ? '' : 'tomorrow '}${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    return `until ${clock(u)}`
+  })
+
+  async function setAutoStart(on: boolean) {
+    try {
+      autoStart = await api.setAutostart(on)
+    } catch (e) {
+      fail(e)
+    }
+  }
+
+  async function checkUpdate() {
+    updateStep = 'checking'
+    try {
+      update = await api.checkUpdate()
+      updateStep = update ? 'idle' : 'none'
+      updateLater = false
+    } catch (e) {
+      updateStep = 'idle'
+      fail(e)
+    }
+  }
+
+  async function installUpdate() {
+    if (!update) return
+    updateStep = 'installing'
+    try {
+      await api.installUpdate(update.version)
+      say(`Installing Setu ${update.version}. Setu closes for a moment and starts again.`)
+    } catch (e) {
+      updateStep = 'idle'
+      fail(e)
+    }
+  }
+
+  async function moveEngine() {
+    busy = true
+    try {
+      await api.moveEngine()
+    } catch (e) {
+      fail(e)
+    } finally {
+      busy = false
+    }
+  }
+
+  async function setQuiet(quiet: boolean) {
+    try {
+      view = await api.setQuietProgress(quiet)
+    } catch (e) {
+      fail(e)
+    }
+  }
+
+  async function setLimit(which: 0 | 1, value: number) {
+    if (!limits || !Number.isFinite(value) || value < 0) return
+    const next: [number, number] = [...limits]
+    next[which] = Math.round(value)
+    try {
+      limits = await api.setLimits(next[0], next[1])
+      say(next[which] ? `${which ? 'Upload' : 'Download'} limited to ${next[which]} KB/s.` : `No ${which ? 'upload' : 'download'} limit.`)
+    } catch (e) {
+      fail(e)
+    }
+  }
+
+  /** Items of the More menu: things used now and then. */
+  async function more(what: 'versions' | 'same' | 'check' | 'duplicates' | 'rescan' | 'open' | 'refresh') {
+    moreMenu = false
+    if (what === 'refresh') return refresh()
+    if (what === 'open') return api.openPath(null).catch(fail)
+    if (what === 'rescan') {
+      try {
+        await api.verify(true)
+        say('Looking through every synced folder for changes.')
+      } catch (e) {
+        fail(e)
+      }
+      return
+    }
+    trust = what
+  }
+
+  /** Close an open menu when clicking anywhere outside it. */
+  function outside(e: MouseEvent) {
+    if ((e.target as Element | null)?.closest('.menuwrap')) return
+    pauseMenu = false
+    moreMenu = false
+  }
+
+  /** "45% of 2.1 GB · 12 MB/s · 3 min left" for one direction. */
+  function flowText(f: Flow): string {
+    const left = snap?.paused ? 'paused' : f.etaSecs !== null ? `${rate(f.speed)} · about ${duration(f.etaSecs)} left` : f.speed ? rate(f.speed) : 'starting'
+    return `${Math.floor(f.percent)}% of ${bytes(f.totalBytes)} · ${left}`
+  }
+
+  /** The direction to show in the header and the bottom bar: the one with more left. */
+  const lead = $derived.by((): Flow | null => {
+    if (!snap) return null
+    const fs = [snap.down, snap.up].filter((f) => f.active)
+    return fs.sort((a, b) => b.leftBytes - a.leftBytes)[0] ?? null
   })
 
   /** Quick setup: choose for the whole folder. */
@@ -327,7 +478,8 @@
   }
 
   function onkey(e: KeyboardEvent) {
-    if (e.key === 'Escape' && pauseMenu) pauseMenu = false
+    if (e.key === 'Escape' && (pauseMenu || moreMenu)) pauseMenu = moreMenu = false
+    else if (e.key === 'Escape' && showProgress) showProgress = false
     else if (e.key === 'Escape' && trust) trust = null
     else if (e.key === 'Escape' && plan) plan = null
     else if ((e.key === 'F5' || (e.ctrlKey && e.key === 'r')) && !plan) {
@@ -344,8 +496,14 @@
   })
 
   /** One plain line about copying, for the bottom bar. */
-  const progress = $derived.by((): { text: string; tone: 'ok' | 'busy' | 'wait' | 'bad' } | null => {
+  const progress = $derived.by((): { text: string; tone: 'ok' | 'busy' | 'wait' | 'bad'; pct?: number } | null => {
     if (pausedText) return { text: `Paused by you ${pausedText}. Nothing is copied to or from this computer.`, tone: 'wait' }
+    if (snap && other && (snap.down.active || snap.up.active) && !snap.paused && other.connected) {
+      const parts = []
+      if (snap.down.active) parts.push(`To this computer: ${flowText(snap.down)}`)
+      if (snap.up.active) parts.push(`To ${there}: ${flowText(snap.up)}`)
+      return { text: parts.join('   ·   '), tone: 'busy', pct: lead?.percent }
+    }
     if (!checks || !other) return null
     if (checks.length === 0) return { text: 'Nothing syncs yet. Press Quick setup to choose what to copy.', tone: 'wait' }
     if (checks.some((c) => c.errors.length)) return { text: 'Some files could not be copied. Press to see which.', tone: 'bad' }
@@ -366,7 +524,7 @@
   })
 </script>
 
-<svelte:window onkeydown={onkey} />
+<svelte:window onkeydown={onkey} onclick={outside} />
 
 <div class="shell">
   <header class="top">
@@ -403,25 +561,40 @@
           {view.fileConflicts} conflict{view.fileConflicts === 1 ? '' : 's'}
         </button>
       {/if}
-      <div class="pausewrap">
+      <button class="btn prog" class:going={!!lead} onclick={() => (showProgress = true)} title="Copy progress: speed, time so far, time left, per folder">
+        {#if lead}<span class="spin" aria-hidden="true"></span>{Math.floor(lead.percent)}%{:else}Progress{/if}
+      </button>
+      <div class="menuwrap">
         {#if pausedText}
-          <button class="btn primary" onclick={() => pause(null)} title="Paused {pausedText}">Resume syncing</button>
+          <button class="btn primary" onclick={() => pause(null)} title="Paused {pausedText}">Resume</button>
         {:else}
-          <button class="btn" onclick={() => (pauseMenu = !pauseMenu)} aria-expanded={pauseMenu} title="Stop copying on this computer for a while">Pause</button>
+          <button class="btn" onclick={() => ((pauseMenu = !pauseMenu), (moreMenu = false))} aria-expanded={pauseMenu} title="Stop copying on this computer for a while">Pause</button>
           {#if pauseMenu}
             <div class="menu" role="menu">
-              <button role="menuitem" onclick={() => pause('hour')}>For 1 hour</button>
-              <button role="menuitem" onclick={() => pause('tomorrow')}>Until tomorrow morning</button>
-              <button role="menuitem" onclick={() => pause('manual')}>Until I resume</button>
+              {#each pauseChoices as c (c.how)}
+                <button role="menuitem" onclick={() => pause(c.how)}>{c.label}</button>
+              {/each}
             </div>
           {/if}
         {/if}
       </div>
-      <button class="btn" onclick={() => (trust = 'versions')} title="Get back a file that was changed or deleted in the last 30 days">Old versions</button>
-      <button class="btn" onclick={() => (trust = 'check')} title="See whether every synced folder is fully copied">Progress</button>
-      <button class="btn" onclick={() => (trust = 'same')} title="Check that every computer holds exactly the same files, and see removed duplicates">Same everywhere?</button>
-      <button class="btn" onclick={() => (guide = true)} title="Choose what to copy in two steps">Quick setup</button>
-      <button class="btn" onclick={refresh} title="Read the folders again (F5)">Refresh</button>
+      <button class="btn hide-narrow" onclick={() => (guide = true)} title="Choose what to copy in two steps">Quick setup</button>
+      <div class="menuwrap">
+        <button class="btn" onclick={() => ((moreMenu = !moreMenu), (pauseMenu = false))} aria-expanded={moreMenu} aria-haspopup="menu" title="More">More ▾</button>
+        {#if moreMenu}
+          <div class="menu" role="menu">
+            <button role="menuitem" class="show-narrow" onclick={() => ((moreMenu = false), (guide = true))}>Quick setup…</button>
+            <button role="menuitem" onclick={() => more('versions')}>Old versions…</button>
+            <button role="menuitem" onclick={() => more('check')}>Is it all copied?…</button>
+            <button role="menuitem" onclick={() => more('same')}>Same everywhere?…</button>
+            <button role="menuitem" onclick={() => more('duplicates')}>Duplicates removed…</button>
+            <hr />
+            <button role="menuitem" onclick={() => more('rescan')}>Look for changes now</button>
+            <button role="menuitem" onclick={() => more('open')}>Open this computer's folder</button>
+            <button role="menuitem" onclick={() => more('refresh')}>Refresh <span class="key">F5</span></button>
+          </div>
+        {/if}
+      </div>
     {/if}
   </header>
 
@@ -461,13 +634,64 @@
       {#if view.watch.relayed && !view.watch.allowRelay}<button class="btn" onclick={() => allow('relay', true)}>Copy anyway through the relay</button>{/if}
     </div>
   {/if}
-  {#if view?.stage === 'ready' && view.watch && !view.watch.running}
+  {#if engine.state === 'running' && view?.stage === 'ready' && view.watch && !view.watch.running}
     <div class="banner warn">
-      <span>Setu's background helper isn't running. Files still copy, but two safety checks are off: pausing when many files are deleted at once, and waiting for a suitable network. It normally starts when you sign in (<span class="mono">setu-watch</span>).</span>
+      <span>Setu's safety checks are not running yet: pausing when many files are deleted at once, and waiting for a suitable network. Files still copy. They start within a minute; if this stays, quit Setu from the tray and start it again.</span>
+    </div>
+  {/if}
+  {#if engine.state === 'running' && engine.left.length && !leftSeen}
+    <div class="banner warn">
+      <span>Syncthing now runs inside Setu. Some pieces of the old setup could not be removed; remove them yourself when convenient: {engine.left.join(', ')}.</span>
+      <button onclick={() => (leftSeen = true)} aria-label="Dismiss">✕</button>
     </div>
   {/if}
 
-  {#if !view}
+  {#if update && !updateLater}
+    <div class="banner warn">
+      <span>
+        {#if updateStep === 'installing'}Downloading and installing Setu {update.version}… Setu closes for a moment and starts again by itself.
+        {:else}<b>Setu {update.version} is available</b> (you have {version}). Your rules, settings and files stay as they are.{/if}
+      </span>
+      {#if updateStep !== 'installing'}
+        <button class="btn primary" onclick={installUpdate}>Update now</button>
+        <button class="btn" onclick={() => (updateLater = true)}>Later</button>
+      {/if}
+    </div>
+  {/if}
+
+  {#if engine.state !== 'running'}
+    <div class="center">
+      <div class="card">
+        {#if engine.state === 'move'}
+          <h1>Move Syncthing into Setu</h1>
+          <p class="muted">
+            Setu now has its sync engine built in, so nothing else needs to run in the background. Syncthing still runs on its own on this computer, so
+            Setu takes it over once. This is what happens:
+          </p>
+          <ol class="steps">
+            {#each engine.steps as s}<li>{s}</li>{/each}
+          </ol>
+          <div class="row-end"><button class="btn primary" disabled={busy} onclick={moveEngine}>Move it into Setu</button></div>
+        {:else if engine.state === 'moving'}
+          <h1>Moving Syncthing into Setu…</h1>
+          <p class="muted">Stopping the old Syncthing, copying its identity, settings and file index, then checking the result. This takes about a minute.</p>
+        {:else if engine.state === 'tailnet'}
+          <h1>Waiting for Tailscale</h1>
+          <p class="muted">
+            Setu copies files only over Tailscale, your private network, and this computer has no Tailscale address yet. Start Tailscale and sign in;
+            Setu goes on by itself.
+          </p>
+        {:else if engine.state === 'failed'}
+          <h1>The sync engine could not start</h1>
+          <p>{engine.message}</p>
+          <p class="muted small">Details are in the engine's log, <span class="mono">engine.log</span>, in Setu's engine folder.</p>
+        {:else}
+          <h1>Starting…</h1>
+          <p class="muted">Starting Setu's sync engine.</p>
+        {/if}
+      </div>
+    </div>
+  {:else if !view}
     <div class="center muted">Starting…</div>
   {:else if view.stage === 'setup'}
     <div class="center">
@@ -597,6 +821,35 @@
               <p class="muted small">Now: {view.watch.running ? `${view.watch.metered ? 'limited-data connection' : 'normal connection'}, ${view.watch.relayed ? 'through a relay' : 'direct link'}` : 'helper not running'}</p>
             </div>
           {/if}
+          <div class="never">
+            <h3>Updates</h3>
+            <p class="muted small">This is Setu {version}. Setu looks for a new version twice a day and tells you; it installs only when you say so.</p>
+            {#if update}
+              <p class="small"><b>Setu {update.version}</b> is available.</p>
+              {#if update.notes}<pre class="notes">{update.notes}</pre>{/if}
+              <button class="btn primary" disabled={updateStep === 'installing'} onclick={installUpdate}>{updateStep === 'installing' ? 'Installing…' : 'Update now'}</button>
+            {:else}
+              <button class="btn" disabled={updateStep === 'checking'} onclick={checkUpdate}>{updateStep === 'checking' ? 'Checking…' : 'Check for updates'}</button>
+              {#if updateStep === 'none'}<span class="muted small">You have the newest version.</span>{/if}
+            {/if}
+          </div>
+          {#if autoStart !== null}
+            <div class="never">
+              <h3>Start-up</h3>
+              <label class="tog"><input type="checkbox" checked={autoStart} onchange={(e) => setAutoStart((e.currentTarget as HTMLInputElement).checked)} /> Start Setu when I sign in to this computer</label>
+              <p class="muted small">Setu keeps your folders in sync only while it runs. Closing the window keeps it running; Quit Setu in the tray stops it.</p>
+            </div>
+          {/if}
+          <div class="never">
+            <h3>Speed and notifications</h3>
+            <label class="tog"><input type="checkbox" checked={!view.quietProgress} onchange={(e) => setQuiet(!(e.currentTarget as HTMLInputElement).checked)} /> Show copy progress in desktop notifications</label>
+            {#if limits}
+              {@const lim = limits}
+              <label class="tog lim">Download limit <input type="number" min="0" step="100" value={lim[0]} onchange={(e) => setLimit(0, (e.currentTarget as HTMLInputElement).valueAsNumber)} /> KB/s</label>
+              <label class="tog lim">Upload limit <input type="number" min="0" step="100" value={lim[1]} onchange={(e) => setLimit(1, (e.currentTarget as HTMLInputElement).valueAsNumber)} /> KB/s</label>
+              <p class="muted small">0 means no limit. Applies to all copying on this computer.</p>
+            {/if}
+          </div>
         {/if}
       </aside>
     </main>
@@ -616,9 +869,10 @@
         <div class="grow"></div>
         <button class="btn primary" onclick={review}>Review</button>
       {:else if progress}
-        <button class="status {progress.tone}" onclick={() => (trust = 'check')} title="Show each folder">
+        <button class="status {progress.tone}" onclick={() => (progress.tone === 'bad' ? (trust = 'check') : (showProgress = true))} title={progress.text}>
           {#if progress.tone === 'busy'}<span class="spin" aria-hidden="true"></span>{/if}
-          {progress.text}
+          {#if progress.pct !== undefined}<span class="mini" aria-hidden="true"><span style="width:{progress.pct}%"></span></span>{/if}
+          <span class="txt">{progress.text}</span>
         </button>
       {:else}
         <span class="muted">Checking progress…</span>
@@ -642,6 +896,9 @@
   {/if}
   {#if plan && me && other}
     <PlanSheet view={plan} {me} {there} {busy} onclose={() => (plan = null)} onapply={apply} />
+  {/if}
+  {#if showProgress && me && other}
+    <ProgressSheet {snap} {there} {pausedText} onpause={pause} onclose={() => (showProgress = false)} onchanged={say} />
   {/if}
   {#if trust && me && other}
     <TrustSheet bind:tab={trust} {there} onclose={() => (trust = null)} onchanged={changed} />
@@ -793,6 +1050,25 @@
   .card p {
     margin: 0 0 16px;
   }
+  .steps {
+    margin: 0 0 16px;
+    padding-left: 20px;
+    max-height: 45vh;
+    overflow-y: auto;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .steps li + li {
+    margin-top: 6px;
+  }
+  .notes {
+    max-height: 160px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font: inherit;
+    font-size: 12px;
+    margin: 0 0 8px;
+  }
   .stack {
     display: flex;
     flex-direction: column;
@@ -835,20 +1111,32 @@
     grid-template-columns: minmax(0, 1fr) 340px;
   }
   .top .btn {
+    flex: none;
     white-space: nowrap;
+  }
+  .top .link {
+    min-width: 0;
   }
   @media (max-width: 1100px) {
     .rev {
       display: none;
     }
   }
+  @media (max-width: 860px) {
+    .hide-narrow {
+      display: none;
+    }
+    .show-narrow {
+      display: block;
+    }
+    .top {
+      gap: 10px;
+    }
+  }
   @media (max-width: 760px) {
     .link .dev:first-child,
     .brand .word {
       display: none;
-    }
-    .top {
-      gap: 10px;
     }
   }
   @media (max-width: 900px) {
@@ -985,17 +1273,69 @@
   .bar {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
-    height: 56px;
-    padding: 0 16px;
+    min-height: 56px;
+    padding: 8px 16px;
     border-top: 1px solid var(--line);
     background: var(--surface);
+  }
+  .bar > span {
+    min-width: 0;
   }
   .bar.live {
     background: color-mix(in srgb, var(--accent) 7%, var(--surface));
   }
-  .pausewrap {
+  .menuwrap {
     position: relative;
+    flex: none;
+  }
+  .menu hr {
+    width: 100%;
+    margin: 4px 0;
+    border: 0;
+    border-top: 1px solid var(--line);
+  }
+  .key {
+    float: right;
+    margin-left: 16px;
+    color: var(--faint);
+    font-size: 12px;
+  }
+  .prog.going {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 76px;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .mini {
+    flex: none;
+    width: 70px;
+    height: 5px;
+    border-radius: 5px;
+    background: color-mix(in srgb, currentColor 18%, transparent);
+    overflow: hidden;
+  }
+  .mini span {
+    display: block;
+    height: 100%;
+    background: currentColor;
+    transition: width 600ms ease;
+  }
+  .status .txt {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lim input {
+    width: 90px;
+    margin-left: auto;
+  }
+  .show-narrow {
+    display: none;
   }
   .menu {
     position: absolute;
@@ -1025,6 +1365,7 @@
     align-items: center;
     gap: 8px;
     min-width: 0;
+    max-width: 100%;
     padding: 6px 12px;
     border-radius: 99px;
     font-weight: 600;

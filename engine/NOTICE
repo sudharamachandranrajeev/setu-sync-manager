@@ -1,0 +1,14 @@
+Setu's sync engine
+==================
+
+Setu contains Syncthing's code (https://syncthing.net), version v2.1.7, built into the program
+as a library. Syncthing is copyright the Syncthing contributors and is licensed under the
+Mozilla Public License 2.0; the full text is in LICENSE-MPL-2.0 next to this file.
+
+The source code of Syncthing as used by Setu is available from:
+  https://github.com/syncthing/syncthing/tree/v2.1.7
+Setu uses it unmodified. Setu's own Go code that drives it (engine/go in Setu's repository,
+https://github.com/sudharamachandranrajeev/setu-sync-manager) is also MPL-2.0.
+
+Syncthing in turn uses Go modules under their own licences (BSD, MIT, Apache 2.0, MPL 2.0 and
+others); the list with versions is engine/go/go.sum in Setu's repository.

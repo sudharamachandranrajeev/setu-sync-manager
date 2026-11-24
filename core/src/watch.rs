@@ -65,6 +65,11 @@ pub struct WatchState {
     pub alive_at: u64,
 }
 
+/// Milliseconds since 1970.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
 pub fn state_path(dir: &Path) -> PathBuf {
     dir.join("watch.json")
 }
@@ -81,10 +86,35 @@ fn write_state(dir: &Path, s: &WatchState) -> Result<(), Error> {
 pub fn release_hold(dir: &Path, client: &Client, folder: &str) -> Result<(), Error> {
     let mut s = read_state(dir);
     s.holds.retain(|h| h.folder != folder);
-    if !s.gate_paused.contains(folder) && s.gate.open {
+    let by_hand = LocalConfig::load(dir).is_ok_and(|c| c.paused_folders.contains(folder));
+    if !s.gate_paused.contains(folder) && s.gate.open && !by_hand {
         client.patch_folder(folder, &json!({ "paused": false }))?;
     }
     write_state(dir, &s)
+}
+
+/// Pause or resume one Setu folder on this computer by hand. The choice is kept in
+/// `local.json`, so the network gate never resumes a folder the person paused. A folder resumed
+/// while the whole computer is on hold starts again when the hold ends.
+pub fn set_folder_paused(dir: &Path, client: &Client, folder: &str, pause: bool) -> Result<(), Error> {
+    if !folder.starts_with(FOLDER_PREFIX) {
+        return Err(Error::Rules(format!("{folder} is not a Setu folder")));
+    }
+    let mut cfg = LocalConfig::load(dir)?;
+    if pause {
+        cfg.paused_folders.insert(folder.to_string());
+    } else {
+        cfg.paused_folders.remove(folder);
+    }
+    cfg.save(dir)?;
+    let s = read_state(dir);
+    let held = s.holds.iter().any(|h| h.folder == folder);
+    if pause {
+        client.patch_folder(folder, &json!({ "paused": true }))?;
+    } else if s.gate.open && !held {
+        client.patch_folder(folder, &json!({ "paused": false }))?;
+    }
+    Ok(())
 }
 
 /// A command that opens no console window on Windows.
@@ -194,22 +224,28 @@ fn setu_folders(client: &Client) -> Result<Vec<(String, bool)>, Error> {
         .collect())
 }
 
-/// Pause or resume folders to match the gate. Returns the new state.
-pub fn apply_gate(state: &mut WatchState, gate: Gate, client: &Client) -> Result<(), Error> {
+/// Pause or resume folders to match the gate. `by_hand`: folders the person paused one by one,
+/// which stay paused either way.
+pub fn apply_gate(state: &mut WatchState, gate: Gate, client: &Client, by_hand: &BTreeSet<String>) -> Result<(), Error> {
     let folders = setu_folders(client)?;
+    let held: BTreeSet<&str> = state.holds.iter().map(|h| h.folder.as_str()).collect();
     if gate.open {
-        let held: BTreeSet<&str> = state.holds.iter().map(|h| h.folder.as_str()).collect();
         for id in std::mem::take(&mut state.gate_paused) {
-            if !held.contains(id.as_str()) && folders.iter().any(|(f, _)| *f == id) {
+            if !held.contains(id.as_str()) && !by_hand.contains(&id) && folders.iter().any(|(f, _)| *f == id) {
                 client.patch_folder(&id, &json!({ "paused": false }))?;
             }
         }
     } else {
         for (id, paused) in folders {
+            if held.contains(id.as_str()) || by_hand.contains(&id) {
+                state.gate_paused.remove(&id);
+                continue;
+            }
             if !paused {
                 client.patch_folder(&id, &json!({ "paused": true }))?;
-                state.gate_paused.insert(id);
             }
+            // Also a folder resumed by hand while on hold: it starts again when the hold ends.
+            state.gate_paused.insert(id);
         }
     }
     state.gate = gate;
@@ -222,7 +258,7 @@ pub fn gate_now(dir: &Path, cfg: &LocalConfig, client: &Client) -> Result<Gate, 
     let me = client.my_id()?;
     let mut state = read_state(dir);
     let gate = check_gate(cfg, client, &me);
-    apply_gate(&mut state, gate, client)?;
+    apply_gate(&mut state, gate, client, &cfg.paused_folders)?;
     write_state(dir, &state)?;
     Ok(state.gate)
 }
@@ -286,11 +322,30 @@ pub fn conflict_names(ev: &Value) -> Vec<String> {
 pub struct Notice {
     pub title: String,
     pub body: String,
+    /// A progress bar. Notices with the same tag update one notification in place.
+    pub bar: Option<Bar>,
 }
 
-fn notice(title: &str, body: String) -> Notice {
-    Notice { title: title.into(), body }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bar {
+    pub tag: String,
+    /// 0 to 1000.
+    pub permille: u16,
+    /// Under the bar, e.g. "12 MB/s · about 3 min left".
+    pub status: String,
+    /// Beside the bar, e.g. "1.2 GB of 3.4 GB".
+    pub value: String,
+    /// The last update: the round is over.
+    pub done: bool,
 }
+
+pub fn notice(title: &str, body: String) -> Notice {
+    Notice { title: title.into(), body, bar: None }
+}
+
+/// How often the helper reads copy progress, while copying and while not.
+const PROGRESS_BUSY: Duration = Duration::from_secs(3);
+const PROGRESS_IDLE: Duration = Duration::from_secs(15);
 
 /// Folder errors are repeated by Syncthing on every pull; tell once an hour per folder.
 const ERROR_NOTICE_EVERY: u64 = 3600;
@@ -307,6 +362,11 @@ pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, clie
     // At start, treat the gate as open: a closed gate is told once, an open one not at all.
     let mut gate_known = false;
     let mut ticker = crate::helper::Ticker::default();
+    let mut by_hand: BTreeSet<String> = BTreeSet::new();
+    let mut meter = crate::progress::Meter::default();
+    let mut announcer = crate::progress::Announcer::default();
+    let mut next_progress = Instant::now();
+    let mut copying = false;
     loop {
         // The Brahma round: shared rules, pairing, applying, content check and tidy.
         if ticker.due(dir) {
@@ -314,9 +374,10 @@ pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, clie
                 notify(&n);
             }
         }
-        // A pause or resume in Setu takes effect at once, not at the next network check.
+        // A pause or resume in Setu, of everything or one folder, takes effect at once, not at
+        // the next network check.
         if let Ok(cfg) = cfg_loader()
-            && cfg.user_paused(now_secs()) != state.gate.user_paused
+            && (cfg.user_paused(now_secs()) != state.gate.user_paused || cfg.paused_folders != by_hand)
         {
             next_gate = Instant::now();
         }
@@ -327,7 +388,8 @@ pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, clie
                 let gate = check_gate(&cfg, client, &me);
                 // The person paused or resumed it themselves: no notice for that.
                 let quiet = was_user || gate.user_paused;
-                match apply_gate(&mut state, gate, client) {
+                by_hand = cfg.paused_folders.clone();
+                match apply_gate(&mut state, gate, client, &by_hand) {
                     Ok(()) if quiet => {}
                     Ok(()) if was_open && !state.gate.open => notify(&notice(
                         "Setu: syncing on hold",
@@ -343,10 +405,28 @@ pub fn run(dir: &Path, cfg_loader: impl Fn() -> Result<LocalConfig, Error>, clie
             state.alive_at = now_secs();
             write_state(dir, &state)?;
         }
+        // Copy progress: a notification that updates itself while a big round of copying runs.
+        if Instant::now() >= next_progress {
+            match crate::progress::read(client, &me, now_ms()) {
+                Ok(r) => {
+                    let (snap, finished) = meter.observe(r, !state.gate.open);
+                    copying = snap.active();
+                    let quiet = cfg_loader().is_ok_and(|c| c.quiet_progress);
+                    for n in announcer.notices(&snap, &finished) {
+                        if !quiet {
+                            notify(&n);
+                        }
+                    }
+                }
+                Err(e) => eprintln!("setu watch: progress: {e}"),
+            }
+            next_progress = Instant::now() + if copying { PROGRESS_BUSY } else { PROGRESS_IDLE };
+        }
         // Holds released in the app since the last loop.
         let on_disk = read_state(dir);
         state.holds.retain(|h| on_disk.holds.contains(h));
-        match client.events(since, 20) {
+        // While copying, come back soon for the next progress reading.
+        match client.events(since, if copying { PROGRESS_BUSY.as_secs() } else { 20 }) {
             Ok(evs) => {
                 let mut conflicts = Vec::new();
                 for ev in &evs {
