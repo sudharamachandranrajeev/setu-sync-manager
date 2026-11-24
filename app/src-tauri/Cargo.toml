@@ -24,6 +24,7 @@ ureq = { version = "3.5", features = ["json"] }
 semver = "1"
 minisign-verify = "0.2"
 base64 = "0.22"
+tempfile = "3.27"
 
 [target.'cfg(windows)'.dependencies]
 # Already used by notify-rust on Windows; used directly for the toast's progress bar.

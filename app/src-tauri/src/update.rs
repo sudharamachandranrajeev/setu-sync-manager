@@ -111,17 +111,18 @@ pub fn install(u: &Update) -> Result<(), String> {
     let data = download(&u.url, 512 * 1024 * 1024)?;
     let sig = download(&u.sig_url, 64 * 1024)?;
     verify(&data, &sig, PUBLIC_KEY)?;
-    let dir = std::env::temp_dir().join(format!("setu-update-{}", u.version));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // A new folder with a random name only this user can open (0700 on Linux), so nobody else
+    // on the computer can swap the checked download, or what it unpacks to, before it runs.
+    // Kept afterwards: the installer runs from it after Setu has quit.
+    let dir = tempfile::Builder::new().prefix("setu-update-").tempdir().map_err(|e| e.to_string())?.keep();
     let file = dir.join(&u.asset);
     std::fs::write(&file, &data).map_err(|e| e.to_string())?;
-    run_installer(&file, &dir)
+    run_installer(&file, &dir, &u.version)
 }
 
 /// The setup program, silently, into the folder Setu runs from, for the same users.
 #[cfg(windows)]
-fn run_installer(file: &Path, _dir: &Path) -> Result<(), String> {
+fn run_installer(file: &Path, _dir: &Path, _version: &str) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let app_dir = exe.parent().ok_or("no program folder")?;
     let per_user = std::env::var_os("LOCALAPPDATA").is_some_and(|l| app_dir.starts_with(std::path::PathBuf::from(l)));
@@ -135,18 +136,17 @@ fn run_installer(file: &Path, _dir: &Path) -> Result<(), String> {
 
 /// Unpack and run `install.sh --restart` in its own process group, so it outlives this Setu.
 #[cfg(not(windows))]
-fn run_installer(file: &Path, dir: &Path) -> Result<(), String> {
+fn run_installer(file: &Path, dir: &Path, version: &str) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
     let ok = std::process::Command::new("tar").arg("-xzf").arg(file).arg("-C").arg(dir).status().map_err(|e| format!("tar: {e}"))?;
     if !ok.success() {
         return Err("could not unpack the download".into());
     }
-    let script = std::fs::read_dir(dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(Result::ok)
-        .map(|e| e.path().join("install.sh"))
-        .find(|p| p.is_file())
-        .ok_or("the download has no install.sh")?;
+    // The one folder packaging/linux/package.sh puts in the archive.
+    let script = dir.join(format!("setu-{version}-linux-x64")).join("install.sh");
+    if !script.is_file() {
+        return Err("the download has no install.sh where Setu expects it".into());
+    }
     // Keep the person's choice about starting at login.
     let mut args = vec!["--restart"];
     if !crate::host::autostart::enabled() {

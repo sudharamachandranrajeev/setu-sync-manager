@@ -3982,6 +3982,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-winrt-notification",
+ "tempfile",
  "ureq",
 ]
 

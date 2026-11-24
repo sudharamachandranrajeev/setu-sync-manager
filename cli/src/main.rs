@@ -13,6 +13,23 @@ use setu_core::session::Session;
 use setu_core::watch;
 use setu_core::Error;
 
+/// Print a line with control characters other than newline and tab escaped. File names,
+/// computer names and folder labels come from other computers; a crafted one must not be able
+/// to send escape sequences to this terminal.
+macro_rules! say {
+    () => { println!() };
+    ($($t:tt)*) => { println!("{}", printable(&format!($($t)*))) };
+}
+macro_rules! say_err {
+    ($($t:tt)*) => { eprintln!("{}", printable(&format!($($t)*))) };
+}
+
+fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() && c != '\n' && c != '\t' { c.escape_unicode().to_string() } else { c.to_string() })
+        .collect()
+}
+
 const USAGE: &str = "\
 setu: choose what syncs between your computers, and which way.
 Most commands talk to the running Setu app, which holds the sync engine.
@@ -71,7 +88,7 @@ fn main() -> ExitCode {
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("setu: {e}");
+            say_err!("setu: {e}");
             ExitCode::FAILURE
         }
     }
@@ -89,7 +106,7 @@ fn run(args: &[String]) -> Result<(), Error> {
             let root = std::fs::canonicalize(&root).map_err(|e| Error::Setup(format!("{root}: {e}")))?;
             let cfg = LocalConfig { root: strip_verbatim(root), syncthing_home: flag(args, "--syncthing-home").map(PathBuf::from), ..Default::default() };
             cfg.save(&config_dir())?;
-            println!("This computer's folder: {}", cfg.root.display());
+            say!("This computer's folder: {}", cfg.root.display());
             Ok(())
         }
         "sign-in" => {
@@ -100,24 +117,24 @@ fn run(args: &[String]) -> Result<(), Error> {
             let pw = rpassword::prompt_password("Brahma password: ")?;
             match s.hub.sign_in(server, email, &pw) {
                 Err(Error::RecoveryKeyNeeded) => {
-                    println!("Your password was reset. Run `setu recovery-key` to unlock your data.");
+                    say!("Your password was reset. Run `setu recovery-key` to unlock your data.");
                     return Ok(());
                 }
                 r => r?,
             }
-            println!("Signed in as {email}.");
+            say!("Signed in as {email}.");
             after_sign_in(&s)
         }
         "recovery-key" => {
             let s = Session::open()?;
             let key = rpassword::prompt_password("Recovery key: ")?;
             s.hub.unlock_with_recovery_key(key.trim())?;
-            println!("Unlocked.");
+            say!("Unlocked.");
             after_sign_in(&s)
         }
         "sign-out" => {
             Session::open()?.hub.sign_out()?;
-            println!("Signed out. Folders already set up keep syncing; new choices no longer arrive.");
+            say!("Signed out. Folders already set up keep syncing; new choices no longer arrive.");
             Ok(())
         }
         "join" => {
@@ -126,7 +143,7 @@ fn run(args: &[String]) -> Result<(), Error> {
                 return Err(Error::Setup("sign in first: setu sign-in <server> <email>".into()));
             }
             let rs = s.join(args.iter().any(|a| a == "--backup"))?;
-            println!("Rules revision {} for {}. Choose folders with `setu rule`, then `setu apply`.", rs.revision, names(&rs));
+            say!("Rules revision {} for {}. Choose folders with `setu rule`, then `setu apply`.", rs.revision, names(&rs));
             Ok(())
         }
         "devices" => devices(&Session::open()?),
@@ -138,16 +155,16 @@ fn run(args: &[String]) -> Result<(), Error> {
                 for (top, mine) in &digests {
                     match d.digests.get(top) {
                         Some(theirs) if theirs.hash == mine.hash => {}
-                        Some(_) if !mine.settled || !theirs_settled(d, top) => println!("  {top}: still syncing with {}", d.name),
+                        Some(_) if !mine.settled || !theirs_settled(d, top) => say!("  {top}: still syncing with {}", d.name),
                         Some(_) => {
                             differ += 1;
-                            println!("  {top}: differs from {} (`setu differences {} {top}`)", d.name, short_id(&d.id));
+                            say!("  {top}: differs from {} (`setu differences {} {top}`)", d.name, short_id(&d.id));
                         }
-                        None => println!("  {top}: {} has not checked it yet", d.name),
+                        None => say!("  {top}: {} has not checked it yet", d.name),
                     }
                 }
             }
-            println!("Checked {} top folders here.", digests.len());
+            say!("Checked {} top folders here.", digests.len());
             if differ > 0 {
                 return Err(Error::Setup(format!("{differ} folder(s) differ")));
             }
@@ -160,34 +177,34 @@ fn run(args: &[String]) -> Result<(), Error> {
             let s = Session::open()?;
             let id = s.hub.devices()?.into_iter().find(|d| d.id.starts_with(who.as_str()) || d.name == *who).map(|d| d.id).ok_or_else(|| Error::Setup(format!("no computer {who:?} in your account")))?;
             let Some(m) = s.mismatches(&id, top) else {
-                println!("The file lists for {top} have not arrived yet. Run `setu check` on both computers.");
+                say!("The file lists for {top} have not arrived yet. Run `setu check` on both computers.");
                 return Ok(());
             };
             for x in &m {
-                println!("  {}: {}", x.path, x.what);
+                say!("  {}: {}", x.path, x.what);
             }
-            println!("{} difference(s).", m.len());
+            say!("{} difference(s).", m.len());
             Ok(())
         }
         "tidy" => {
             let removed = Session::open()?.tidy()?;
             for r in &removed {
-                println!("  removed {} ({}, same as {})", r.removed.display(), r.kind, r.kept.display());
+                say!("  removed {} ({}, same as {})", r.removed.display(), r.kind, r.kept.display());
             }
-            println!("{} copies removed. `setu undo <path>` puts one back.", removed.len());
+            say!("{} copies removed. `setu undo <path>` puts one back.", removed.len());
             Ok(())
         }
         "tidy-log" => {
             for r in setu_core::tidy::read_log(&config_dir()) {
                 let undone = if r.undone { " (put back)" } else { "" };
-                println!("  {} {} {} ({}){undone}", r.at, r.kind, r.removed.display(), size(r.size));
+                say!("  {} {} {} ({}){undone}", r.at, r.kind, r.removed.display(), size(r.size));
             }
             Ok(())
         }
         "undo" => {
             let path = args.get(1).ok_or_else(|| Error::Setup("usage: setu undo <removed-path>".into()))?;
             setu_core::tidy::undo(&config_dir(), std::path::Path::new(path))?;
-            println!("Put back: {path}");
+            say!("Put back: {path}");
             Ok(())
         }
         "status" => status(&Session::open()?),
@@ -212,7 +229,7 @@ fn run(args: &[String]) -> Result<(), Error> {
             let kind = if args.iter().any(|a| a == "--file") { Kind::File } else { Kind::Dir };
             rs.set(path, kind, mode)?;
             s.save_draft(rs)?;
-            println!("Draft updated. `setu plan` shows what applying would change.");
+            say!("Draft updated. `setu plan` shows what applying would change.");
             Ok(())
         }
         "plan" => {
@@ -232,7 +249,7 @@ fn run(args: &[String]) -> Result<(), Error> {
                 return Err(Error::Rules("fix the problems above first".into()));
             }
             if plan.is_empty() && s.shared()?.is_some_and(|r| s.hub.device(&s.ctx.me).ok().flatten().is_some_and(|d| d.applied_revision == r.revision)) {
-                println!("Nothing to do.");
+                say!("Nothing to do.");
                 return Ok(());
             }
             if !args.iter().any(|a| a == "--yes") {
@@ -241,7 +258,7 @@ fn run(args: &[String]) -> Result<(), Error> {
                 let mut line = String::new();
                 std::io::stdin().lock().read_line(&mut line)?;
                 if line.trim() != "yes" {
-                    println!("Nothing changed.");
+                    say!("Nothing changed.");
                     return Ok(());
                 }
             }
@@ -255,29 +272,29 @@ fn run(args: &[String]) -> Result<(), Error> {
                 guard_ok = line.trim() == "replace";
             }
             let r = s.apply(&plan, &pv, guard_ok)?;
-            println!("Done: {} added, {} changed, {} removed. Revision {} applied here.", r.added, r.updated, r.removed, plan.revision);
+            say!("Done: {} added, {} changed, {} removed. Revision {} applied here.", r.added, r.updated, r.removed, plan.revision);
             Ok(())
         }
         "discard" => {
             Session::open()?.discard_draft()?;
-            println!("Draft dropped.");
+            say!("Draft dropped.");
             Ok(())
         }
         "quit" => {
             if setu_core::pipe::quit_running()? {
-                println!("Setu stopped.");
+                say!("Setu stopped.");
             } else {
-                println!("Setu was not running.");
+                say!("Setu was not running.");
             }
             Ok(())
         }
         "version" | "--version" => {
-            println!("setu {}", env!("CARGO_PKG_VERSION"));
+            say!("setu {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         "index" => {
             let n = Session::open()?.scan_here()?.len();
-            println!("File list written: {n} entries.");
+            say!("File list written: {n} entries.");
             Ok(())
         }
         "allow" => {
@@ -294,7 +311,7 @@ fn run(args: &[String]) -> Result<(), Error> {
                 _ => return Err(Error::Setup("usage: setu allow metered|relay on|off".into())),
             }
             cfg.save(&dir)?;
-            println!("Saved. Setu uses it within a minute.");
+            say!("Saved. Setu uses it within a minute.");
             Ok(())
         }
         "pause" | "unpause" => {
@@ -313,7 +330,7 @@ fn run(args: &[String]) -> Result<(), Error> {
             if watch::read_state(&s.dir).alive_at + 120 < setu_core::control::now_secs() {
                 watch::gate_now(&s.dir, &cfg, &s.client)?;
             }
-            println!("{}", match cfg.paused_until {
+            say!("{}", match cfg.paused_until {
                 None => "Syncing resumes (unless the network is on hold).".to_string(),
                 Some(0) => "Syncing paused here until `setu unpause`.".to_string(),
                 Some(_) => format!("Syncing paused here for {} minutes.", args[1]),
@@ -326,7 +343,7 @@ fn run(args: &[String]) -> Result<(), Error> {
             match (args.get(1).map(String::as_str), args.get(2)) {
                 (None, _) => {
                     for l in &rules.always_ignore {
-                        println!("{l}");
+                        say!("{l}");
                     }
                     return Ok(());
                 }
@@ -345,14 +362,14 @@ fn run(args: &[String]) -> Result<(), Error> {
                 _ => return Err(Error::Setup("usage: setu leave-out [add|remove <name>]".into())),
             }
             s.save_draft(rules)?;
-            println!("Saved in the draft. `setu apply` makes it count, on both computers.");
+            say!("Saved in the draft. `setu apply` makes it count, on both computers.");
             Ok(())
         }
         "resume" => {
             let s = Session::open()?;
             let id = args.get(1).ok_or_else(|| Error::Setup("usage: setu resume <folder-id>".into()))?;
             watch::release_hold(&s.dir, &s.client, id)?;
-            println!("Resumed {id}.");
+            say!("Resumed {id}.");
             Ok(())
         }
         "pause-folder" | "resume-folder" => {
@@ -360,7 +377,7 @@ fn run(args: &[String]) -> Result<(), Error> {
             let id = args.get(1).ok_or_else(|| Error::Setup(format!("usage: setu {} <folder-id>", args[0])))?;
             let s = Session::open()?;
             watch::set_folder_paused(&s.dir, &s.client, id, pause)?;
-            println!("{} {id}.", if pause { "Paused" } else { "Resumed" });
+            say!("{} {id}.", if pause { "Paused" } else { "Resumed" });
             Ok(())
         }
         "progress-notices" => {
@@ -372,7 +389,7 @@ fn run(args: &[String]) -> Result<(), Error> {
                 _ => return Err(Error::Setup("usage: setu progress-notices on|off".into())),
             };
             cfg.save(&dir)?;
-            println!("Saved. Setu uses it at its next reading.");
+            say!("Saved. Setu uses it at its next reading.");
             Ok(())
         }
         "progress" => progress(&Session::open()?, args.iter().any(|a| a == "--watch")),
@@ -381,14 +398,14 @@ fn run(args: &[String]) -> Result<(), Error> {
             let here = Tree::new(setu_core::index::scan(&s.local.root, &s.working()?.always_ignore)?);
             let cs = s.conflicts(&here)?;
             if cs.is_empty() {
-                println!("No conflict copies.");
+                say!("No conflict copies.");
             }
             for c in &cs {
                 let file = match c.original_size {
                     Some(n) => format!("file {}", size(n)),
                     None => "file is gone".into(),
                 };
-                println!("{}\n    copy {}, {file}", c.copy, size(c.copy_size));
+                say!("{}\n    copy {}, {file}", c.copy, size(c.copy_size));
             }
             Ok(())
         }
@@ -402,7 +419,7 @@ fn run(args: &[String]) -> Result<(), Error> {
                 _ => return Err(usage()),
             };
             let moved = s.resolve(copy, keep_copy)?;
-            println!("Done. Kept the {}; the other one is in {}.", if keep_copy { "copy" } else { "file" }, moved.display());
+            say!("Done. Kept the {}; the other one is in {}.", if keep_copy { "copy" } else { "file" }, moved.display());
             Ok(())
         }
         "versions" => {
@@ -411,10 +428,10 @@ fn run(args: &[String]) -> Result<(), Error> {
             let list = s.versions()?;
             let list: Vec<_> = list.iter().filter(|k| only.is_none_or(|p| k.rel == *p || k.rel.starts_with(&format!("{p}/")))).collect();
             if list.is_empty() {
-                println!("No old versions kept.");
+                say!("No old versions kept.");
             }
             for k in list {
-                println!("{}  {}  {}  {} {}", k.version.version_time, size(k.version.size), k.rel, k.folder, k.version.path);
+                say!("{}  {}  {}  {} {}", k.version.version_time, size(k.version.size), k.rel, k.folder, k.version.path);
             }
             Ok(())
         }
@@ -424,15 +441,15 @@ fn run(args: &[String]) -> Result<(), Error> {
                 return Err(Error::Setup("usage: setu restore <folder-id> <path> <version-time> (copy them from `setu versions`)".into()));
             };
             match s.restore(folder, path, time)? {
-                setu_core::trust::Restored::InPlace => println!("Restored {path}. The file it replaced is kept in .stversions."),
-                setu_core::trust::Restored::Beside(rel) => println!("This computer only receives this folder, so the old version is saved beside it: {rel}"),
+                setu_core::trust::Restored::InPlace => say!("Restored {path}. The file it replaced is kept in .stversions."),
+                setu_core::trust::Restored::Beside(rel) => say!("This computer only receives this folder, so the old version is saved beside it: {rel}"),
             }
             Ok(())
         }
         "verify" => {
             let checks = Session::open()?.verify(args.iter().any(|a| a == "--rescan"))?;
             if checks.is_empty() {
-                println!("No folders sync yet.");
+                say!("No folders sync yet.");
                 return Ok(());
             }
             let mut bad = 0;
@@ -440,21 +457,21 @@ fn run(args: &[String]) -> Result<(), Error> {
                 let other = c.other_completion.map(|p| format!(", other computer {p:.0} %")).unwrap_or_default();
                 let mark = if c.ok { "ok  " } else { bad += 1; "NOT " };
                 let name = if c.rel.is_empty() { "(whole folder)" } else { &c.rel };
-                println!("{mark} {name}  [{} {}]  needs {} files ({}){other}", c.folder_type, c.state, c.need_files, size(c.need_bytes));
+                say!("{mark} {name}  [{} {}]  needs {} files ({}){other}", c.folder_type, c.state, c.need_files, size(c.need_bytes));
                 if c.local_changes > 0 {
-                    println!("       {} files changed here are not sent back (this side only receives)", c.local_changes);
+                    say!("       {} files changed here are not sent back (this side only receives)", c.local_changes);
                 }
                 for e in c.errors.iter().take(10) {
-                    println!("       error: {e}");
+                    say!("       error: {e}");
                 }
                 for p in c.samples.iter().take(10) {
-                    println!("       waiting: {p}");
+                    say!("       waiting: {p}");
                 }
             }
             if bad > 0 {
                 return Err(Error::Syncthing(format!("{bad} folder(s) not complete")));
             }
-            println!("All {} folder(s) complete here.", checks.len());
+            say!("All {} folder(s) complete here.", checks.len());
             Ok(())
         }
         _ => {
@@ -467,15 +484,15 @@ fn run(args: &[String]) -> Result<(), Error> {
 /// After signing in: keep Syncthing on the tailnet, and say what changed.
 fn after_sign_in(s: &Session) -> Result<(), Error> {
     match setu_core::mesh::harden(&s.client, &setu_core::mesh::tailnet_ips()) {
-        Ok(changed) if !changed.is_empty() => println!("Syncthing now stays on Tailscale (changed: {}).", changed.join(", ")),
+        Ok(changed) if !changed.is_empty() => say!("Syncthing now stays on Tailscale (changed: {}).", changed.join(", ")),
         Ok(_) => {}
-        Err(e) => println!("Note: {e}"),
+        Err(e) => say!("Note: {e}"),
     }
     s.sync_hub()?;
     if s.shared()?.is_some_and(|r| r.devices.contains_key(&s.ctx.me)) {
-        println!("This computer is in your rules already; the helper (`setu watch`) keeps it up to date.");
+        say!("This computer is in your rules already; the helper (`setu watch`) keeps it up to date.");
     } else {
-        println!("Next: `setu join` (or `setu join --backup` for a copy that only receives).");
+        say!("Next: `setu join` (or `setu join --backup` for a copy that only receives).");
     }
     Ok(())
 }
@@ -504,9 +521,9 @@ fn devices(s: &Session) -> Result<(), Error> {
             _ => "not in the rules".to_string(),
         };
         let seen = if me { String::new() } else { format!("; last seen {} min ago", now.saturating_sub(d.updated_at) / 60) };
-        println!("  {} [{}] {}: {link}; {state}{seen}", d.name, short_id(&d.id), d.os.map(|o| format!("{o:?}")).unwrap_or_default());
+        say!("  {} [{}] {}: {link}; {state}{seen}", d.name, short_id(&d.id), d.os.map(|o| format!("{o:?}")).unwrap_or_default());
         for p in &d.problems {
-            println!("      problem: {p}");
+            say!("      problem: {p}");
         }
     }
     Ok(())
@@ -538,10 +555,10 @@ fn describe(rs: &RuleSet, m: &Mode) -> String {
 
 fn print_rules(rs: &RuleSet, s: &Session) {
     let draft = s.draft().ok().flatten().is_some();
-    println!("Rules revision {}{}", rs.revision, if draft { " (with unapplied draft changes)" } else { "" });
-    println!("  (root)  {}", describe(rs, &rs.root));
+    say!("Rules revision {}{}", rs.revision, if draft { " (with unapplied draft changes)" } else { "" });
+    say!("  (root)  {}", describe(rs, &rs.root));
     for (p, r) in &rs.rules {
-        println!("  {p}{}  {}", if r.kind == Kind::Dir { "/" } else { "" }, describe(rs, &r.mode));
+        say!("  {p}{}  {}", if r.kind == Kind::Dir { "/" } else { "" }, describe(rs, &r.mode));
     }
 }
 
@@ -564,17 +581,17 @@ fn size(b: u64) -> String {
 }
 
 fn print_preview(p: &Preview, rules: &RuleSet) {
-    println!("Files:");
+    say!("Files:");
     if p.other_unknown {
-        println!("  (the other computer's file list has not arrived; only this side is counted)");
+        say!("  (the other computer's file list has not arrived; only this side is counted)");
     }
     if p.groups.is_empty() {
-        println!("  nothing syncs under these rules");
+        say!("  nothing syncs under these rules");
     }
     for g in &p.groups {
         let name = if g.rel.is_empty() { "(whole folder)" } else { &g.rel };
         let mode = Mode::parse(&g.mode).map(|m| describe(rules, &m)).unwrap_or_else(|_| g.mode.clone());
-        println!("  {name}  [{mode}]");
+        say!("  {name}  [{mode}]");
         for (label, c) in [
             ("send", g.send),
             ("receive", g.receive),
@@ -585,37 +602,37 @@ fn print_preview(p: &Preview, rules: &RuleSet) {
             ("already the same", g.same),
         ] {
             if c.files > 0 {
-                println!("    {label}: {} file(s), {}", c.files, size(c.bytes));
+                say!("    {label}: {} file(s), {}", c.files, size(c.bytes));
             }
         }
     }
     for n in &p.windows_names {
-        println!("  WINDOWS NAME {}: {}", n.path, n.message);
+        say!("  WINDOWS NAME {}: {}", n.path, n.message);
     }
     for g in &p.guard {
-        println!("  CAREFUL {g}");
+        say!("  CAREFUL {g}");
     }
 }
 
 fn print_plan(plan: &Plan) {
-    println!("Plan for revision {} ({} Setu folder(s); {} already right):", plan.revision, plan.folders, plan.unchanged);
+    say!("Plan for revision {} ({} Setu folder(s); {} already right):", plan.revision, plan.folders, plan.unchanged);
     for p in &plan.problems {
-        println!("  PROBLEM {}: {}", if p.path.is_empty() { "(rules)" } else { &p.path }, p.message);
+        say!("  PROBLEM {}: {}", if p.path.is_empty() { "(rules)" } else { &p.path }, p.message);
     }
     for a in &plan.actions {
         match a {
-            Action::Remove { id, path, .. } => println!("  remove  {id}  {path}  (files stay)"),
-            Action::Update { id, path, changes, .. } => println!("  change  {id}  {path}: {}", changes.join(", ")),
+            Action::Remove { id, path, .. } => say!("  remove  {id}  {path}  (files stay)"),
+            Action::Update { id, path, changes, .. } => say!("  change  {id}  {path}: {}", changes.join(", ")),
             Action::Add { id, path, folder_type, files_only, .. } => {
-                println!("  add     {id}  {path}  [{folder_type}{}]", if *files_only { ", chosen files only" } else { "" })
+                say!("  add     {id}  {path}  [{folder_type}{}]", if *files_only { ", chosen files only" } else { "" })
             }
         }
     }
     for w in &plan.warnings {
-        println!("  NOTE {w}");
+        say!("  NOTE {w}");
     }
     if plan.actions.is_empty() && plan.problems.is_empty() {
-        println!("  no changes to Syncthing here");
+        say!("  no changes to Syncthing here");
     }
 }
 
@@ -649,19 +666,19 @@ fn progress(s: &Session, keep: bool) -> Result<(), Error> {
             print!("\x1b[2J\x1b[H");
         }
         if snap.paused {
-            println!("On hold on this computer: copying waits.");
+            say!("On hold on this computer: copying waits.");
         }
-        println!("{}", line("To this computer", &snap.down));
-        println!("{}", line("To the others", &snap.up));
+        say!("{}", line("To this computer", &snap.down));
+        say!("{}", line("To the others", &snap.up));
         for p in &snap.peers {
-            println!("  {} {}", p.name, if p.connected { "connected" } else { "offline" });
+            say!("  {} {}", p.name, if p.connected { "connected" } else { "offline" });
         }
         for f in &snap.folders {
             let here = if f.global_bytes == 0 { 100.0 } else { (f.global_bytes - f.need_bytes.min(f.global_bytes)) as f64 * 100.0 / f.global_bytes as f64 };
             let paused = f.paused_by.as_deref().map(|b| format!(" (paused: {b})")).unwrap_or_default();
-            println!("  {}  {}  {}  here {here:.1}%{}{paused}", f.id, f.name, f.state, f.other_completion.map(|c| format!(", others {c:.1}%")).unwrap_or_default());
+            say!("  {}  {}  {}  here {here:.1}%{}{paused}", f.id, f.name, f.state, f.other_completion.map(|c| format!(", others {c:.1}%")).unwrap_or_default());
             for c in &f.copying {
-                println!("      copying {c}");
+                say!("      copying {c}");
             }
         }
         if !keep {
@@ -671,15 +688,15 @@ fn progress(s: &Session, keep: bool) -> Result<(), Error> {
 }
 
 fn status(s: &Session) -> Result<(), Error> {
-    println!("This computer: {} ({})", short_id(&s.ctx.me), s.local.root.display());
-    println!("Control folder: {}", s.control.dir.display());
+    say!("This computer: {} ({})", short_id(&s.ctx.me), s.local.root.display());
+    say!("Control folder: {}", s.control.dir.display());
     match s.hub.account() {
-        Some(a) => println!("Brahma account: {} on {}", a.email, a.server),
-        None => println!("Brahma account: not signed in"),
+        Some(a) => say!("Brahma account: {} on {}", a.email, a.server),
+        None => say!("Brahma account: not signed in"),
     }
     let Some(rs) = s.shared()? else {
         let how = if s.hub.signed_in() { "`setu join`" } else { "`setu sign-in <server> <email>`, then `setu join`" };
-        println!("No rules yet: run {how}.");
+        say!("No rules yet: run {how}.");
         return Ok(());
     };
     let conns = s.client.connections()?;
@@ -697,25 +714,25 @@ fn status(s: &Session) -> Result<(), Error> {
             Some(st) if st.applied_at > 0 => format!("applied revision {}", st.applied_revision),
             _ => "has not applied any rules".into(),
         };
-        println!("  {} [{}] {:?}: {link}; {applied}", d.name, short_id(id), d.os);
+        say!("  {} [{}] {:?}: {link}; {applied}", d.name, short_id(id), d.os);
     }
-    println!("Shared rules: revision {}", rs.revision);
+    say!("Shared rules: revision {}", rs.revision);
     for c in s.control.conflicts() {
-        println!("  WARNING conflicting copy in control folder: {c}");
+        say!("  WARNING conflicting copy in control folder: {c}");
     }
     if s.draft()?.is_some() {
-        println!("A draft with unapplied changes exists (`setu plan`).");
+        say!("A draft with unapplied changes exists (`setu plan`).");
     }
     let w = watch::read_state(&s.dir);
     if w.alive_at + 120 < setu_core::control::now_secs() {
-        println!("Background helper: not running (it runs inside Setu; is Setu still starting?).");
+        say!("Background helper: not running (it runs inside Setu; is Setu still starting?).");
     } else if w.gate.open {
-        println!("Background helper: running; network fine.");
+        say!("Background helper: running; network fine.");
     } else {
-        println!("Background helper: running; Setu folders held here: {}.", w.gate.reason.as_deref().unwrap_or("network"));
+        say!("Background helper: running; Setu folders held here: {}.", w.gate.reason.as_deref().unwrap_or("network"));
     }
     for h in &w.holds {
-        println!("  HELD {}: {} deletions arrived at once; paused. `setu resume {}` after checking.", h.folder, h.deletes, h.folder);
+        say!("  HELD {}: {} deletions arrived at once; paused. `setu resume {}` after checking.", h.folder, h.deletes, h.folder);
     }
     Ok(())
 }
