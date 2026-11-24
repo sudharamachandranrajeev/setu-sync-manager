@@ -92,19 +92,44 @@ eight computers.
 
 ## 🚀 Get started
 
-You need on every computer:
+You need:
 
-- [Tailscale](https://tailscale.com/download), signed in to the same tailnet.
 - A Brahma account on your own Brahma server (see
   [Brahma](https://github.com/sudharamachandranrajeev/brahma-life-suite)). It only holds your
   choices and each computer's status, encrypted. Your files never go through it.
+- [Tailscale](https://tailscale.com/download) on every computer, signed in to the same account.
+  On Linux the install command below sets it up for you.
 
-1. **Install Setu on each computer.** Download it from the
-   [Releases page](https://github.com/sudharamachandranrajeev/setu-sync-manager/releases):
-   - **Windows:** run `Setu-…-windows-x64-setup.exe`. It is not code-signed yet, so Windows
-     SmartScreen may warn: choose **More info**, then **Run anyway**.
-   - **Linux:** unpack `setu-…-linux-x64.tar.gz`, open a terminal in that folder and run
-     `./install.sh`. It installs for you only (no `sudo`) and adds Setu to the app menu.
+1. **Install Setu on each computer.**
+
+   **Windows:** download `Setu-…-windows-x64-setup.exe` from the
+   [Releases page](https://github.com/sudharamachandranrajeev/setu-sync-manager/releases) and
+   run it. It is not code-signed yet, so Windows SmartScreen may warn: choose **More info**, then
+   **Run anyway**.
+
+   **Linux (Arch, Omarchy, Ubuntu, Debian, Fedora):** open a terminal (on Omarchy:
+   `Super + Enter`), paste this line and press Enter:
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/sudharamachandranrajeev/setu-sync-manager/main/install-linux.sh | bash
+   ```
+
+   That is all. Type your password when it asks. The command:
+
+   1. installs the few libraries Setu's window needs (on Arch and Omarchy:
+      `sudo pacman -S --needed webkit2gtk-4.1 gtk3 libayatana-appindicator`);
+   2. installs and starts Tailscale if it is missing. If this computer is not signed in to
+      Tailscale yet, it shows a link: open it and sign in with the same account as your other
+      computers;
+   3. downloads the newest Setu and checks the download is not damaged (SHA-256);
+   4. installs Setu for you only, in `~/.local/bin`, adds it to the app menu (on Omarchy:
+      `Super + Space`, type *Setu*) and opens it.
+
+   Options go after `bash -s --`, for example
+   `curl -fsSL …/install-linux.sh | bash -s -- --no-autostart`:
+   `--no-autostart` (do not start Setu at login), `--no-deps` (skip steps 1 and 2) and
+   `--uninstall` (remove Setu; your rules, settings and files stay). Want to read it first? It is
+   [install-linux.sh](install-linux.sh), about 130 lines.
 
    Both start Setu at sign-in, in the background. Setu syncs only while it runs: it copies the
    files, sets up new choices, pairs your computers, checks the copies, pauses syncing on a
@@ -141,19 +166,29 @@ Your rules, settings, this computer's sync identity and your files are kept. Set
 downloads signed with its release key. If the signature does not match, it installs nothing
 and tells you.
 
-### From 0.1.0-alpha.4 or older: once, by hand
+On Linux, running the install command again also updates Setu, and keeps your start-at-login
+choice:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sudharamachandranrajeev/setu-sync-manager/main/install-linux.sh | bash
+```
+
+### From 0.1.0-alpha.4 or older: once
 
 Those versions have no updater, and Syncthing still ran as its own program. Do this once on
 each computer. Your computers keep syncing with each other while you go through them one by one.
 
 1. **Make sure Tailscale is running** and signed in on that computer.
-2. **Install the new version over the old one.** Get it from the
-   [Releases page](https://github.com/sudharamachandranrajeev/setu-sync-manager/releases).
-   - **Windows:** run `Setu-…-windows-x64-setup.exe`. It stops the old background helper and
-     removes `setu-watch.exe` and its "Setu helper" sign-in entry. Then it installs the new Setu.
-   - **Linux:** unpack `setu-…-linux-x64.tar.gz`, open a terminal in that folder and run
-     `./install.sh`. It stops and removes the old `setu-watch` service, then installs the new
-     Setu and its login entry.
+2. **Install the new version over the old one.**
+   - **Windows:** download `Setu-…-windows-x64-setup.exe` from the
+     [Releases page](https://github.com/sudharamachandranrajeev/setu-sync-manager/releases) and
+     run it. It stops the old background helper and removes `setu-watch.exe` and its "Setu
+     helper" sign-in entry. If the old "Syncthing (Setu)" start-up task is there (it opened a
+     PowerShell window at sign-in), Windows asks once for admin rights so the installer can
+     remove it: choose **Yes**.
+   - **Linux (Arch, Omarchy and others):** run the same one-line command as for a new install
+     (see [Get started](#-get-started)). It stops and removes the old `setu-watch` service, then
+     installs the new Setu and opens it.
 3. **Open Setu.** It shows **Move Syncthing into Setu** with every step it will take. Read the
    steps, then press **Move it into Setu**. Setu then:
    - stops the separately running Syncthing;
@@ -283,7 +318,8 @@ that does everything the window does.
 | `engine/` | The sync engine: Syncthing v2.1.7 as a Go library (`go/`, MPL-2.0), built with cgo into a static library and called directly from Rust. No REST API, no local port |
 | `cli/` | The `setu` command. It talks to the running Setu over a local pipe that only you can open |
 | `app/` | Setu itself: window and tray, and the host of the engine and the background helper. Svelte front end in `src/`, Tauri back end in `src-tauri/` |
-| `packaging/` | The Linux download (`linux/package.sh`) and the Windows installer (`windows/setu.iss`, Inno Setup) |
+| `packaging/` | The Linux download (`linux/package.sh`, with `linux/install.sh` inside) and the Windows installer (`windows/setu.iss`, Inno Setup) |
+| `install-linux.sh` | The one-line Linux install and update: libraries, Tailscale, newest release, checksum, then the release's `install.sh` |
 
 Building needs, besides Rust and Node: **Go** (the version in `engine/go/go.mod`) and a C
 compiler for cgo. On Linux that is the usual `gcc`. On Windows it is

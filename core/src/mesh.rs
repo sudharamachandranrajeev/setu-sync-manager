@@ -34,14 +34,23 @@ pub fn is_tailnet(ip: &IpAddr) -> bool {
     }
 }
 
-/// This computer's Tailscale addresses, from `tailscale ip`.
+/// This computer's Tailscale addresses, from `tailscale ip`, keeping only those it can listen
+/// on. Tailscale reports an IPv6 address even where Windows has not put it on the adapter (IPv6
+/// off there); listening on it would fail and retry for as long as Setu runs.
 pub fn tailnet_ips() -> Vec<IpAddr> {
-    let out = std::process::Command::new("tailscale").arg("ip").output();
-    let Ok(out) = out else { return Vec::new() };
+    let mut cmd = std::process::Command::new("tailscale");
+    cmd.arg("ip");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: Setu has no console to share
+    }
+    let Ok(out) = cmd.output() else { return Vec::new() };
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| l.trim().parse::<IpAddr>().ok())
         .filter(is_tailnet)
+        .filter(|ip| std::net::UdpSocket::bind((*ip, 0)).is_ok())
         .collect()
 }
 

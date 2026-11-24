@@ -89,9 +89,28 @@ begin
   Exec('taskkill.exe', '/F /IM setu-watch.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
+// The scheduled task that started the old, separate Syncthing through PowerShell at sign-in.
+// It was made with admin rights, so deleting it needs them too: try without first, then ask
+// Windows for admin rights (one prompt) only when the task is still there. Setu's first start
+// moves that Syncthing's identity into Setu whether or not the task exists.
+const
+  OldTask = '\Syncthing (Setu)';
+
+procedure RemoveOldSyncthingTask();
+var
+  Code: Integer;
+begin
+  if not (Exec('schtasks.exe', '/Query /TN "' + OldTask + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0)) then
+    exit;
+  if Exec('schtasks.exe', '/Delete /F /TN "' + OldTask + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0) then
+    exit;
+  ShellExec('runas', 'schtasks.exe', '/Delete /F /TN "' + OldTask + '"', '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   StopSetu();
+  RemoveOldSyncthingTask();
   Result := '';
 end;
 
