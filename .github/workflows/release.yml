@@ -22,7 +22,7 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: engine/go/go.mod
           cache-dependency-path: engine/go/go.sum
@@ -71,7 +71,7 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: engine/go/go.mod
           cache-dependency-path: engine/go/go.sum
