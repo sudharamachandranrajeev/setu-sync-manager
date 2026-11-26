@@ -22,8 +22,8 @@ notify-rust = "4.18"
 # In-app updates: GitHub releases over HTTPS, versions, and the download's signature.
 ureq = { version = "3.5", features = ["json"] }
 semver = "1"
-minisign-verify = "0.2"
-base64 = "0.22"
+minisign-verify = "0.3"
+base64 = "0.23"
 tempfile = "3.27"
 
 [target.'cfg(windows)'.dependencies]
