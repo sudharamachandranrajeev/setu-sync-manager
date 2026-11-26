@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "setu-app"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "base64 0.23.1",
  "minisign-verify",
@@ -4015,7 +4015,7 @@ dependencies = [
 
 [[package]]
 name = "setu-cli"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "rpassword",
  "serde_json",
@@ -4024,7 +4024,7 @@ dependencies = [
 
 [[package]]
 name = "setu-core"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "brahma-sync",
  "flate2",
@@ -4045,7 +4045,7 @@ dependencies = [
 
 [[package]]
 name = "setu-engine"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "brahma-sync",
  "serde",
