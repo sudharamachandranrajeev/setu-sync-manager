@@ -168,6 +168,8 @@ export interface NodeView {
   explicit: string | null
   effective: string
   from: string | null
+  /** The choice of the folder it is in, which it follows when it has none of its own. */
+  inherited: string
 }
 
 export interface Problem {
@@ -326,6 +328,8 @@ export const api = {
   refresh: () => invoke<View>('refresh'),
   children: (path: string) => invoke<NodeView[]>('children', { path }),
   setRule: (path: string, dir: boolean, mode: string | null) => invoke<View>('set_rule', { path, dir, mode }),
+  /** One choice for many items: [path, is folder]. All or nothing. */
+  setRules: (items: [string, boolean][], mode: string | null) => invoke<View>('set_rules', { items, mode }),
   setLeaveOut: (list: string[]) => invoke<View>('set_leave_out', { list }),
   setPause: (until: number | null) => invoke<View>('set_pause', { until }),
   pauseFolder: (folder: string, pause: boolean) => invoke<void>('pause_folder', { folder, pause }),

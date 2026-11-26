@@ -7,7 +7,8 @@
     there,
     onpick,
   }: {
-    value: Dir
+    /** `null` when the items it is for differ, so none shows as chosen. */
+    value: Dir | null
     allowed?: Dir[]
     /** Everyday name of the other computer. */
     there: string

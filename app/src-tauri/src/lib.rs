@@ -168,6 +168,8 @@ struct NodeView {
     effective: String,
     /// Where the effective choice comes from: a rule path, or `null` for the root.
     from: Option<String>,
+    /// What the folder it is in has: the choice it follows when it has none of its own.
+    inherited: String,
 }
 
 #[derive(Serialize)]
@@ -380,6 +382,7 @@ async fn children(state: State<'_>, path: String) -> Result<Vec<NodeView>, Strin
         }
     }
     names.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    let inherited = rules.effective(&path).0.to_string();
     Ok(names
         .into_iter()
         .map(|(name, dir)| {
@@ -391,6 +394,7 @@ async fn children(state: State<'_>, path: String) -> Result<Vec<NodeView>, Strin
                 explicit: rules.rules.get(&p).map(|r| r.mode.to_string()),
                 effective: eff.to_string(),
                 from: from.map(String::from),
+                inherited: inherited.clone(),
                 name,
                 path: p,
                 dir,
@@ -408,6 +412,25 @@ async fn set_rule(state: State<'_>, path: String, dir: bool, mode: Option<String
         let mut rules = s.working().map_err(err)?;
         let mode = mode.as_deref().map(Mode::parse).transpose().map_err(err)?;
         rules.set(&path, if dir { Kind::Dir } else { Kind::File }, mode).map_err(err)?;
+        s.save_draft(rules).map_err(err)?;
+    }
+    st.shown_plan = None;
+    Ok(view(&mut st))
+}
+
+/// One choice for many items at once (`[path, is folder]`). All or nothing: if one item can't
+/// take the choice, nothing changes and the error names it.
+#[tauri::command]
+async fn set_rules(state: State<'_>, items: Vec<(String, bool)>, mode: Option<String>) -> Result<View, String> {
+    let mut st = state.lock().unwrap();
+    open(&mut st)?;
+    {
+        let s = st.session.as_ref().unwrap();
+        let mut rules = s.working().map_err(err)?;
+        let mode = mode.as_deref().map(Mode::parse).transpose().map_err(err)?;
+        for (path, dir) in &items {
+            rules.set(path, if *dir { Kind::Dir } else { Kind::File }, mode.clone()).map_err(|e| format!("{path}: {e}"))?;
+        }
         s.save_draft(rules).map_err(err)?;
     }
     st.shown_plan = None;
@@ -506,8 +529,12 @@ async fn open_path(state: State<'_>, path: Option<String>) -> Result<(), String>
     open(&mut st)?;
     let root = st.session.as_ref().unwrap().local.root.clone();
     let p = path.map(PathBuf::from).unwrap_or_else(|| root.clone());
-    // Only folders Setu looks after.
-    if !p.starts_with(&root) || !p.is_dir() {
+    // Only folders Setu looks after. Resolve both first, so `..` or a link can't step outside.
+    let inside = match (p.canonicalize(), root.canonicalize()) {
+        (Ok(c), Ok(r)) => c.starts_with(r) && c.is_dir(),
+        _ => false,
+    };
+    if !inside {
         return Err(format!("{} is not a folder inside {}", p.display(), root.display()));
     }
     let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
@@ -945,7 +972,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            state, refresh, children, set_rule, set_leave_out, set_pause, pause_folder, progress, set_quiet_progress, limits, set_limits, open_path,
+            state, refresh, children, set_rule, set_rules, set_leave_out, set_pause, pause_folder, progress, set_quiet_progress, limits, set_limits, open_path,
             discard, plan, apply, init, pick_folder, sign_in, recovery, sign_out, join, check_now, accuracy, differences, tidy_now, tidy_log, undo_tidy, set_allow,
             resume, conflicts, keep, versions, restore, verify, engine, move_engine, autostart, set_autostart, version, check_update, install_update
         ])

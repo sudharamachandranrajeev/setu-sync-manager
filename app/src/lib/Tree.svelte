@@ -12,20 +12,30 @@
   let {
     rows,
     selected,
+    checked,
+    flat = false,
     meId,
     there,
     remoteKnown,
     onselect,
     ontoggle,
+    oncheck,
   }: {
     rows: Row[]
     selected: string | null
+    /** Ticked items, for one choice on many at once. */
+    checked: { has(path: string): boolean }
+    /** Folder view: one folder's contents; opening a folder goes into it instead of expanding. */
+    flat?: boolean
     meId: string
     /** Everyday name of the other computer. */
     there: string
     remoteKnown: boolean
     onselect: (n: NodeView) => void
+    /** Expand or collapse (tree), or go into the folder (flat). */
     ontoggle: (n: NodeView) => void
+    /** Tick (`on`) or untick these paths. */
+    oncheck: (paths: string[], on: boolean) => void
   } = $props()
 
   const ROW = 34
@@ -33,13 +43,42 @@
   let height = $state(600)
   let start = $derived(Math.max(0, Math.floor(scrollTop / ROW) - 8))
   let end = $derived(Math.min(rows.length, Math.ceil((scrollTop + height) / ROW) + 8))
+  /** Where a Shift-click range starts. */
+  let anchor = $state<string | null>(null)
+
+  const ticked = $derived(rows.filter((r) => checked.has(r.node.path)).length)
+  const all = $derived(rows.length > 0 && ticked === rows.length)
+
+  /** Tick one row, or with Shift everything from the last ticked row to this one. */
+  function tick(n: NodeView, shift: boolean) {
+    const on = !checked.has(n.path)
+    const a = anchor === null ? -1 : rows.findIndex((r) => r.node.path === anchor)
+    const b = rows.findIndex((r) => r.node.path === n.path)
+    if (shift && a >= 0 && b >= 0) {
+      const [lo, hi] = a < b ? [a, b] : [b, a]
+      oncheck(rows.slice(lo, hi + 1).map((r) => r.node.path), true)
+    } else oncheck([n.path], on)
+    anchor = n.path
+  }
+
+  function click(e: MouseEvent, n: NodeView) {
+    if (e.shiftKey || e.ctrlKey || e.metaKey) tick(n, e.shiftKey)
+    else onselect(n)
+  }
 
   function key(e: KeyboardEvent) {
     const i = rows.findIndex((r) => r.node.path === selected)
-    if (e.key === 'ArrowDown' && i < rows.length - 1) onselect(rows[i + 1].node)
-    else if (e.key === 'ArrowUp' && i > 0) onselect(rows[i - 1].node)
-    else if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && i >= 0) {
-      const r = rows[i]
+    const r = i >= 0 ? rows[i] : null
+    if (e.key === 'ArrowDown' && i < rows.length - 1) {
+      onselect(rows[i + 1].node)
+      if (e.shiftKey) tick(rows[i + 1].node, true)
+    } else if (e.key === 'ArrowUp' && i > 0) {
+      onselect(rows[i - 1].node)
+      if (e.shiftKey) tick(rows[i - 1].node, true)
+    } else if (e.key === ' ' && r) tick(r.node, false)
+    else if (e.key === 'a' && (e.ctrlKey || e.metaKey)) oncheck(rows.map((x) => x.node.path), !all)
+    else if (flat && e.key === 'Enter' && r?.node.dir) ontoggle(r.node)
+    else if (!flat && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && r) {
       if (r.node.dir && r.open === (e.key === 'ArrowLeft')) ontoggle(r.node)
     } else return
     e.preventDefault()
@@ -47,7 +86,19 @@
 </script>
 
 <div class="head">
-  <span>Name</span>
+  <span class="namehead">
+    <input
+      type="checkbox"
+      class="tick"
+      checked={all}
+      indeterminate={ticked > 0 && !all}
+      disabled={rows.length === 0}
+      aria-label={all ? 'Untick all' : 'Tick all shown'}
+      title={all ? 'Untick all' : 'Tick everything shown (Ctrl+A)'}
+      onchange={() => oncheck(rows.map((r) => r.node.path), !all)}
+    />
+    Name
+  </span>
   <span class="num" title="Size on this computer">This PC</span>
   <span class="num" title="Size on {there}">{there}</span>
   <span class="dirh">Sync</span>
@@ -72,13 +123,28 @@
         aria-expanded={n.dir ? r.open : undefined}
         tabindex="-1"
         class:sel={selected === n.path}
+        class:ticked={checked.has(n.path)}
         style="top:{(start + i) * ROW}px"
-        onclick={() => onselect(n)}
+        onclick={(e) => click(e, n)}
         ondblclick={() => n.dir && ontoggle(n)}
         onkeydown={() => {}}
       >
         <span class="name" style="padding-left:{8 + r.depth * 18}px">
-          {#if n.dir}
+          <input
+            type="checkbox"
+            class="tick"
+            tabindex="-1"
+            checked={checked.has(n.path)}
+            aria-label="Tick {n.name}"
+            onclick={(e) => {
+              e.stopPropagation()
+              e.preventDefault()
+              tick(n, e.shiftKey)
+            }}
+          />
+          {#if flat}
+            <!-- Folder view: no expand arrow; double-click goes in. -->
+          {:else if n.dir}
             <button
               tabindex="-1"
               class="chev"
@@ -91,9 +157,12 @@
             >
               {#if r.loading}<span class="spin"></span>{:else}<svg viewBox="0 0 16 16" width="12" height="12"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>{/if}
             </button>
-            <svg class="ico folder" viewBox="0 0 20 20" width="17" height="17"><path d="M2.5 5.5a1.5 1.5 0 0 1 1.5-1.5h3.6l1.7 1.8h6.7a1.5 1.5 0 0 1 1.5 1.5v7.7a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5z" fill="currentColor" /></svg>
           {:else}
             <span class="chev"></span>
+          {/if}
+          {#if n.dir}
+            <svg class="ico folder" viewBox="0 0 20 20" width="17" height="17"><path d="M2.5 5.5a1.5 1.5 0 0 1 1.5-1.5h3.6l1.7 1.8h6.7a1.5 1.5 0 0 1 1.5 1.5v7.7a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5z" fill="currentColor" /></svg>
+          {:else}
             <svg class="ico file" viewBox="0 0 20 20" width="16" height="16"><path d="M5 2.5h6.5L15.5 6.5v11H5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" /><path d="M11.5 2.5v4h4" fill="none" stroke="currentColor" stroke-width="1.4" /></svg>
           {/if}
           <span class="label" title={n.path}>{n.name}</span>
@@ -136,8 +205,31 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .head > span:first-child {
-    padding-left: 40px;
+  .namehead {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-left: 8px;
+  }
+  .tick {
+    flex: none;
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .row .tick {
+    opacity: 0.35;
+    transition: opacity 120ms ease-out;
+  }
+  .row:hover .tick,
+  .row.ticked .tick,
+  .row .tick:focus-visible {
+    opacity: 1;
+  }
+  .row.ticked {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
   .scroll {
     flex: 1;

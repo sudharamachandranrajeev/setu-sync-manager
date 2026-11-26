@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { SvelteMap } from 'svelte/reactivity'
   import { listen } from '@tauri-apps/api/event'
   import { api, type EngineStatus, type Update, type Flow, type FolderCheck, type NodeView, type PlanView, type Report, type Snapshot, type View } from './lib/api'
   import DirPicker from './lib/DirPicker.svelte'
@@ -55,6 +56,22 @@
   const there = $derived(me && other ? called(other, me) : 'the other computer')
   const sel = $derived(rows.find((r) => r.node.path === selected)?.node ?? null)
 
+  /** 'folder': one folder at a time, like File Explorer. 'tree': every level in one expanding list. */
+  let layout = $state<'folder' | 'tree'>('folder')
+  /** The folder shown in folder layout ('' = the whole synced folder), and where Back goes. */
+  let cwd = $state('')
+  let backStack = $state<string[]>([])
+  /** Show only names containing this. */
+  let filter = $state('')
+  /** Ticked items, for one choice on many at once. */
+  const ticked = new SvelteMap<string, NodeView>()
+  const shown = $derived.by(() => {
+    const f = filter.trim().toLowerCase()
+    return f ? rows.filter((r) => r.node.name.toLowerCase().includes(f)) : rows
+  })
+  const crumbs = $derived(cwd ? cwd.split('/').map((name, i, all) => ({ name, path: all.slice(0, i + 1).join('/') })) : [])
+  const tickedNodes = $derived([...ticked.values()])
+
   function fail(e: unknown) {
     error = String(e)
   }
@@ -69,8 +86,22 @@
     rows = kids.map((node) => ({ node, depth: 0, open: false, loading: false }))
   }
 
-  /** Re-read every open folder, keeping what is open and what is selected. */
+  /** Re-read what is shown, keeping what is open, selected and ticked. */
   async function reloadOpen() {
+    if (layout === 'folder') {
+      try {
+        rows = (await api.children(cwd)).map((node) => ({ node, depth: 0, open: false, loading: false }))
+      } catch {
+        // The folder went away: show the whole synced folder again.
+        cwd = ''
+        rows = (await api.children('')).map((node) => ({ node, depth: 0, open: false, loading: false }))
+      }
+    } else rows = await readTree()
+    // Ticked items show their new choices.
+    for (const r of rows) if (ticked.has(r.node.path)) ticked.set(r.node.path, r.node)
+  }
+
+  async function readTree(): Promise<Row[]> {
     const open = new Set(rows.filter((r) => r.open).map((r) => r.node.path))
     const build = async (path: string, depth: number): Promise<Row[]> => {
       const out: Row[] = []
@@ -81,7 +112,72 @@
       }
       return out
     }
-    rows = await build('', 0)
+    return build('', 0)
+  }
+
+  /** Go into a folder (folder layout). `remember`: Back returns here. */
+  async function go(path: string, remember = true) {
+    if (path === cwd) return
+    if (remember) backStack.push(cwd)
+    cwd = path
+    filter = ''
+    selected = null
+    ticked.clear()
+    await reloadOpen().catch(fail)
+  }
+
+  function goBack() {
+    const p = backStack.pop()
+    if (p !== undefined) go(p, false)
+  }
+
+  function goUp() {
+    if (cwd) go(cwd.includes('/') ? cwd.slice(0, cwd.lastIndexOf('/')) : '')
+  }
+
+  async function setLayout(l: 'folder' | 'tree') {
+    layout = l
+    filter = ''
+    ticked.clear()
+    await reloadOpen().catch(fail)
+  }
+
+  function tick(paths: string[], on: boolean) {
+    for (const p of paths) {
+      const n = rows.find((r) => r.node.path === p)?.node
+      if (on && n) ticked.set(p, n)
+      else ticked.delete(p)
+    }
+  }
+
+  /** Open the shown folder in File Explorer (or the Linux file manager). */
+  function openHere() {
+    if (!view?.root) return
+    const sep = view.root.includes('\\') ? '\\' : '/'
+    api.openPath(cwd && layout === 'folder' ? view.root.replace(/[\\/]+$/, '') + sep + cwd.split('/').join(sep) : null).catch(fail)
+  }
+
+  /** The choices every ticked item can take. */
+  const bulkAllowed = $derived(tickedNodes.reduce<Dir[]>((acc, n) => acc.filter((d) => allowed(n).includes(d)), ['off', 'out', 'both', 'in']))
+  /** The ticked items' shared choice, or null when they differ. */
+  const bulkValue = $derived.by((): Dir | null => {
+    const ds = new Set(tickedNodes.map((n) => dirOf(n.effective, me?.id)))
+    return ds.size === 1 ? [...ds][0] : null
+  })
+
+  async function pickMany(d: Dir | null) {
+    if (!me || !other || !tickedNodes.length) return
+    const n = tickedNodes.length
+    try {
+      view = await api.setRules(
+        tickedNodes.map((x) => [x.path, x.dir]),
+        d === null ? null : modeOf(d, me, other),
+      )
+      await reloadOpen()
+      say(d === null ? `${n} item${n === 1 ? '' : 's'} now follow their folder.` : `${shortLabel(d, there)} for ${n} item${n === 1 ? '' : 's'}.`)
+    } catch (e) {
+      fail(e)
+    }
   }
 
   async function boot(v: View) {
@@ -150,6 +246,7 @@
   })
 
   async function toggle(n: NodeView) {
+    if (layout === 'folder') return go(n.path)
     const i = rows.findIndex((r) => r.node.path === n.path)
     if (i < 0) return
     const r = rows[i]
@@ -174,10 +271,7 @@
   }
 
   function parentDir(n: NodeView): Dir {
-    const i = n.path.lastIndexOf('/')
-    if (i < 0) return dirOf(view?.rootMode ?? 'off', me?.id)
-    const p = rows.find((r) => r.node.path === n.path.slice(0, i))
-    return dirOf(p?.node.effective ?? 'off', me?.id)
+    return dirOf(n.inherited, me?.id)
   }
 
   /** A file can only take its own direction when its folder is off; otherwise off or the folder's. */
@@ -488,7 +582,18 @@
   }
 
   function onkey(e: KeyboardEvent) {
+    const typing = (e.target as Element | null)?.closest('input, textarea')
     if (e.key === 'Escape' && (pauseMenu || moreMenu)) pauseMenu = moreMenu = false
+    else if (layout === 'folder' && e.altKey && e.key === 'ArrowLeft' && !plan) {
+      e.preventDefault()
+      goBack()
+    } else if (layout === 'folder' && e.altKey && e.key === 'ArrowUp' && !plan) {
+      e.preventDefault()
+      goUp()
+    } else if (layout === 'folder' && e.key === 'Backspace' && !typing && !plan && !trust && !showProgress) {
+      e.preventDefault()
+      goUp()
+    } else if (e.key === 'Escape' && ticked.size && !plan && !trust && !showProgress) ticked.clear()
     else if (e.key === 'Escape' && showProgress) showProgress = false
     else if (e.key === 'Escape' && trust) trust = null
     else if (e.key === 'Escape' && plan) plan = null
@@ -776,11 +881,62 @@
         {#if view.remoteEntries === null}
           <p class="hint">{there}'s file list hasn't arrived yet, so only this computer's files show. It arrives by itself while Setu runs on {there}.</p>
         {/if}
-        <Tree {rows} {selected} meId={me.id} {there} remoteKnown={view.remoteEntries !== null} onselect={(n) => (selected = n.path)} ontoggle={toggle} />
+        <div class="navbar">
+          {#if layout === 'folder'}
+            <button class="iconbtn" onclick={goBack} disabled={!backStack.length} title="Back (Alt+←)" aria-label="Back">←</button>
+            <button class="iconbtn" onclick={goUp} disabled={!cwd} title="Up one folder (Alt+↑)" aria-label="Up one folder">↑</button>
+            <nav class="crumbs" aria-label="Folder path">
+              <button class="bc" class:here={!cwd} onclick={() => go('')}>All files</button>
+              {#each crumbs as c (c.path)}
+                <span class="sep" aria-hidden="true">›</span>
+                <button class="bc" class:here={c.path === cwd} onclick={() => go(c.path)} title={c.path}>{c.name}</button>
+              {/each}
+            </nav>
+          {:else}
+            <span class="crumbs muted small">Every folder, opened in place</span>
+          {/if}
+          <div class="grow"></div>
+          <input class="filter" type="search" placeholder="Filter names…" aria-label="Filter names" bind:value={filter} />
+          <div class="seg" role="radiogroup" aria-label="Layout">
+            <button role="radio" aria-checked={layout === 'folder'} class:on={layout === 'folder'} onclick={() => setLayout('folder')} title="One folder at a time, like File Explorer">Folders</button>
+            <button role="radio" aria-checked={layout === 'tree'} class:on={layout === 'tree'} onclick={() => setLayout('tree')} title="Every level in one expanding list">Tree</button>
+          </div>
+          <button class="btn" onclick={openHere} title="Open this folder in your file manager">Open in {me.os === 'windows' ? 'File Explorer' : 'Files'}</button>
+        </div>
+        <Tree
+          rows={shown}
+          {selected}
+          checked={ticked}
+          flat={layout === 'folder'}
+          meId={me.id}
+          {there}
+          remoteKnown={view.remoteEntries !== null}
+          onselect={(n) => (selected = n.path)}
+          ontoggle={toggle}
+          oncheck={tick}
+        />
+        {#if filter && !shown.length}<p class="hint">No names here contain “{filter}”.</p>{/if}
       </section>
 
       <aside class="details">
-        {#if sel}
+        {#if tickedNodes.length}
+          {@const n = tickedNodes.length}
+          {@const nd = tickedNodes.filter((x) => x.dir).length}
+          {@const nf = n - nd}
+          <h2 class="title">{n} ticked</h2>
+          <p class="muted small">
+            {nd} folder{nd === 1 ? '' : 's'} · {nf} file{nf === 1 ? '' : 's'}
+            · <button class="link-btn" onclick={() => ticked.clear()}>Untick all</button>
+          </p>
+          <p class="say">Choose once for all {n}:</p>
+          <DirPicker value={bulkValue} allowed={bulkAllowed} {there} onpick={pickMany} />
+          {#if bulkAllowed.length < 4}
+            <p class="muted small">Some ticked files are in a folder that syncs, so they can only follow it or be left out. To send them a different way, set their folder to Don't sync first.</p>
+          {/if}
+          <p class="muted small">
+            <button class="link-btn" onclick={() => pickMany(null)}>Make all {n} follow their folder</button>
+          </p>
+        {:else if sel}
           {@const d = dirOf(sel.effective, me.id)}
           <h2 class="title" title={sel.path}>{sel.name}</h2>
           <p class="mono muted crumb">{sel.path}</p>
@@ -1182,6 +1338,90 @@
   .rootrow.sel {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  .navbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 2px 0 8px;
+  }
+  .iconbtn {
+    flex: none;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    font-size: 15px;
+    transition: transform 100ms ease-out;
+  }
+  .iconbtn:hover:not(:disabled) {
+    background: var(--surface-2);
+  }
+  .iconbtn:active:not(:disabled) {
+    transform: scale(0.95);
+  }
+  .iconbtn:disabled {
+    opacity: 0.35;
+  }
+  .crumbs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .bc {
+    min-width: 0;
+    max-width: 180px;
+    padding: 4px 7px;
+    border-radius: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--muted);
+    font-weight: 550;
+  }
+  .bc:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .bc.here {
+    color: var(--text);
+    font-weight: 650;
+  }
+  .sep {
+    color: var(--faint);
+  }
+  .filter {
+    flex: 0 1 170px;
+    min-width: 90px;
+    height: 30px;
+  }
+  .seg {
+    flex: none;
+    display: flex;
+    padding: 2px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+  }
+  .seg button {
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  .seg button.on {
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 12%);
+  }
+  @media (max-width: 900px) {
+    .navbar > .btn {
+      display: none;
+    }
   }
   .rootrow .path {
     font-weight: 600;
