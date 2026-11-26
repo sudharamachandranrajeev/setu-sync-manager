@@ -339,6 +339,8 @@ export const api = {
   plan: () => invoke<PlanView>('plan'),
   apply: (guardConfirmed: boolean) => invoke<Report>('apply', { guardConfirmed }),
   init: (root: string) => invoke<View>('init', { root }),
+  /** Native folder chooser; null when the person cancels. */
+  pickFolder: () => invoke<string | null>('pick_folder'),
   setAllow: (what: 'metered' | 'relay', on: boolean) => invoke<View>('set_allow', { what, on }),
   resume: (folder: string) => invoke<View>('resume', { folder }),
   signIn: (server: string, email: string, password: string) => invoke<View>('sign_in', { server, email, password }),

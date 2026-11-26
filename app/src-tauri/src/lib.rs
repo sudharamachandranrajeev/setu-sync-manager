@@ -553,6 +553,19 @@ async fn apply(state: State<'_>, guard_confirmed: bool) -> Result<Report, String
     st.session.as_ref().unwrap().apply(&plan, &preview, guard_confirmed).map_err(err)
 }
 
+/// Native "choose a folder" window for the setup screen. The page gets only the chosen path,
+/// never dialog access of its own; `init` still checks the path.
+#[tauri::command]
+async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().set_title("Choose the folder Setu looks after").blocking_pick_folder()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    picked.map(|p| p.into_path().map(|p| p.display().to_string()).map_err(|e| e.to_string())).transpose()
+}
+
 #[tauri::command]
 async fn init(state: State<'_>, root: String) -> Result<View, String> {
     let mut st = state.lock().unwrap();
@@ -897,6 +910,8 @@ pub fn run() {
     let host = Arc::new(host::Host::default());
 
     tauri::Builder::default()
+        // Used from Rust only (pick_folder); the page has no dialog permission.
+        .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(AppState::default()))
         .manage(live::Live::default())
         .manage(host.clone())
@@ -931,7 +946,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             state, refresh, children, set_rule, set_leave_out, set_pause, pause_folder, progress, set_quiet_progress, limits, set_limits, open_path,
-            discard, plan, apply, init, sign_in, recovery, sign_out, join, check_now, accuracy, differences, tidy_now, tidy_log, undo_tidy, set_allow,
+            discard, plan, apply, init, pick_folder, sign_in, recovery, sign_out, join, check_now, accuracy, differences, tidy_now, tidy_log, undo_tidy, set_allow,
             resume, conflicts, keep, versions, restore, verify, engine, move_engine, autostart, set_autostart, version, check_update, install_update
         ])
         .build(tauri::generate_context!())

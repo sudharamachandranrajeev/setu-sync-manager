@@ -65,8 +65,9 @@ export function deviceState(d: DeviceView, revision: number | null): { text: str
   return { text: 'setting up', tone: 'busy' }
 }
 
-export function bytes(n: number): string {
-  if (n < 1024) return `${n} B`
+/** A byte count as a number and a unit, rounded the way `bytes` shows it: `{ value: 2.1, unit: 'GB' }`. */
+export function sizeParts(n: number): { value: number; unit: string; decimals: number } {
+  if (n < 1024) return { value: n, unit: 'B', decimals: 0 }
   const u = ['KB', 'MB', 'GB', 'TB']
   let v = n / 1024
   let i = 0
@@ -74,7 +75,13 @@ export function bytes(n: number): string {
     v /= 1024
     i++
   }
-  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${u[i]}`
+  const decimals = v < 10 ? 1 : 0
+  return { value: Number(v.toFixed(decimals)), unit: u[i], decimals }
+}
+
+export function bytes(n: number): string {
+  const { value, unit, decimals } = sizeParts(n)
+  return `${value.toFixed(decimals)} ${unit}`
 }
 
 /** `42 s`, `3 min 12 s`, `2 h 05 min`. */

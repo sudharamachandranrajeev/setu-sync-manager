@@ -7,6 +7,7 @@
   import LeaveOut from './lib/LeaveOut.svelte'
   import PlanSheet from './lib/PlanSheet.svelte'
   import ProgressSheet, { pauseChoices, type PauseHow } from './lib/ProgressSheet.svelte'
+  import TransferBar from './lib/TransferBar.svelte'
   import TrustSheet, { type TrustTab } from './lib/TrustSheet.svelte'
   import Tree, { type Row } from './lib/Tree.svelte'
   import { ago, bytes, called, clock, deviceState, dirOf, duration, modeOf, rate, sentence, shortLabel, type Dir } from './lib/format'
@@ -253,6 +254,15 @@
   async function refresh() {
     try {
       await boot(await api.refresh())
+    } catch (e) {
+      fail(e)
+    }
+  }
+
+  async function browse() {
+    try {
+      const picked = await api.pickFolder()
+      if (picked) rootInput = picked
     } catch (e) {
       fail(e)
     }
@@ -697,8 +707,11 @@
     <div class="center">
       <div class="card">
         <h1>Which folder should Setu look after?</h1>
-        <p class="muted">Type the folder on this computer that holds the files you want to sync. Nothing is copied until you choose what goes where and press Start syncing.</p>
-        <input type="text" placeholder="/home/you/Work or C:\Work" bind:value={rootInput} onkeydown={(e) => e.key === 'Enter' && init()} />
+        <p class="muted">Press Browse and pick the folder on this computer that holds the files you want to sync, or type its path. Nothing is copied until you choose what goes where and press Start syncing.</p>
+        <div class="pickrow">
+          <input type="text" placeholder="/home/you/Work or C:\Work" aria-label="Folder to sync" bind:value={rootInput} onkeydown={(e) => e.key === 'Enter' && init()} />
+          <button class="btn" onclick={browse}>Browse…</button>
+        </div>
         <div class="row-end"><button class="btn primary" disabled={!rootInput.trim()} onclick={init}>Continue</button></div>
       </div>
     </div>
@@ -868,6 +881,8 @@
         <span>Setting up the new sync choices here. If it takes more than a couple of minutes, review them yourself.</span>
         <div class="grow"></div>
         <button class="btn primary" onclick={review}>Review</button>
+      {:else if snap && other && other.connected && !pausedText && !snap.paused && (snap.down.active || snap.up.active)}
+        <TransferBar {snap} {there} onopen={() => (showProgress = true)} />
       {:else if progress}
         <button class="status {progress.tone}" onclick={() => (progress.tone === 'bad' ? (trust = 'check') : (showProgress = true))} title={progress.text}>
           {#if progress.tone === 'busy'}<span class="spin" aria-hidden="true"></span>{/if}
@@ -1329,6 +1344,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .pickrow {
+    display: flex;
+    gap: 8px;
+  }
+  .pickrow input {
+    flex: 1;
+    min-width: 0;
   }
   .lim input {
     width: 90px;
